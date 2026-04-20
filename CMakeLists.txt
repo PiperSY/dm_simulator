@@ -11,6 +11,10 @@ include(CTest)
 add_library(dm_sim_core
     src/sim/event.cpp
     src/sim/scheduler.cpp
+    src/sim/simulator.cpp
+    src/nodes/compute_node.cpp
+    src/nodes/memory_node.cpp
+    src/metrics/stats.cpp
 )
 
 target_include_directories(dm_sim_core
@@ -37,3 +41,14 @@ target_link_libraries(test_scheduler
 )
 
 add_test(NAME scheduler COMMAND test_scheduler)
+
+add_executable(test_request_path
+    tests/test_request_path.cpp
+)
+
+target_link_libraries(test_request_path
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME request_path COMMAND test_request_path)
