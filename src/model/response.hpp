@@ -7,6 +7,7 @@
 namespace dm_sim {
 
 enum class ServedFromTier {
+    LocalCache,
     Memory,
 };
 

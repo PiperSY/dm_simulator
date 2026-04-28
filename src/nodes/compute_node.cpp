@@ -8,14 +8,20 @@ namespace dm_sim {
 
 ComputeNode::ComputeNode(NodeId node_id,
                          NodeId memory_node_id,
-                         const SimulationConfig& config,
+                         const std::vector<RequestSpec>& requests,
+                         SimTime one_way_link_latency,
+                         SimTime local_cache_hit_latency,
+                         LocalCache local_cache,
                          RequestId& next_request_id,
                          std::unordered_map<RequestId, Request>& request_table,
                          std::vector<Response>& responses,
                          Stats& stats)
     : node_id_(node_id),
       memory_node_id_(memory_node_id),
-      config_(config),
+      requests_(requests),
+      one_way_link_latency_(one_way_link_latency),
+      local_cache_hit_latency_(local_cache_hit_latency),
+      local_cache_(std::move(local_cache)),
       next_request_id_(next_request_id),
       request_table_(request_table),
       responses_(responses),
@@ -28,6 +34,9 @@ void ComputeNode::handle_event(const Event& event, Scheduler& scheduler) {
         return;
     case EventType::LocalCacheLookup:
         handle_local_cache_lookup(event, scheduler);
+        return;
+    case EventType::LocalCacheHitComplete:
+        handle_local_cache_hit_complete(event, scheduler);
         return;
     case EventType::ReturnResponse:
         handle_return_response(event, scheduler);
@@ -50,11 +59,11 @@ std::size_t ComputeNode::issued_requests() const noexcept {
 
 void ComputeNode::handle_generate_request(const Event& event,
                                           Scheduler& scheduler) {
-    if (next_request_index_ >= config_.requests.size()) {
+    if (next_request_index_ >= requests_.size()) {
         return;
     }
 
-    const RequestSpec& spec = config_.requests[next_request_index_++];
+    const RequestSpec& spec = requests_[next_request_index_++];
     const RequestId request_id = next_request_id_++;
 
     Request request;
@@ -77,19 +86,55 @@ void ComputeNode::handle_local_cache_lookup(const Event& event,
                                             Scheduler& scheduler) {
     Request& request = request_table_.at(event.request_id);
     request.current_stage = RequestStage::LocalLookup;
+
+    if (local_cache_.lookup(request.object_id, event.time)) {
+        stats_.record_cache_hit(node_id_);
+        scheduler.schedule(Event(event.time + local_cache_hit_latency_,
+                                 EventType::LocalCacheHitComplete,
+                                 node_id_,
+                                 event.request_id));
+        return;
+    }
+
+    stats_.record_cache_miss(node_id_);
     request.current_stage = RequestStage::ForwardedToMemory;
 
-    scheduler.schedule(Event(event.time + config_.one_way_link_latency,
+    scheduler.schedule(Event(event.time + one_way_link_latency_,
                              EventType::ForwardToMemory,
                              memory_node_id_,
                              event.request_id));
 }
 
-void ComputeNode::handle_return_response(const Event& event,
-                                         Scheduler& scheduler) {
+void ComputeNode::handle_local_cache_hit_complete(const Event& event,
+                                                  Scheduler& scheduler) {
     Request& request = request_table_.at(event.request_id);
     request.current_stage = RequestStage::Completed;
 
+    const SimTime latency = event.time - request.issue_time;
+
+    Response response;
+    response.request_id = request.request_id;
+    response.object_id = request.object_id;
+    response.served_from_tier = ServedFromTier::LocalCache;
+    response.completion_time = event.time;
+    response.total_latency = latency;
+    response.bytes_transferred = 0;
+
+    responses_.push_back(response);
+    stats_.record_latency(node_id_, latency);
+
+    if (outstanding_requests_ == 0) {
+        throw std::logic_error("Outstanding request count underflow");
+    }
+    --outstanding_requests_;
+
+    scheduler.schedule(
+        Event(event.time, EventType::RequestComplete, node_id_, event.request_id));
+}
+
+void ComputeNode::handle_return_response(const Event& event,
+                                         Scheduler& scheduler) {
+    Request& request = request_table_.at(event.request_id);
     const SimTime latency = event.time - request.issue_time;
 
     Response response;
@@ -101,7 +146,10 @@ void ComputeNode::handle_return_response(const Event& event,
     response.bytes_transferred = request.size_bytes;
 
     responses_.push_back(response);
-    stats_.record_latency(latency);
+    stats_.record_latency(node_id_, latency);
+    const bool admitted = local_cache_.admit(request, response, event.time);
+    (void)admitted;
+    request.current_stage = RequestStage::Completed;
 
     if (outstanding_requests_ == 0) {
         throw std::logic_error("Outstanding request count underflow");
@@ -116,7 +164,7 @@ void ComputeNode::handle_request_complete(const Event& event,
                                           Scheduler& scheduler) {
     (void)event;
 
-    if (next_request_index_ < config_.requests.size()) {
+    if (next_request_index_ < requests_.size()) {
         scheduler.schedule(
             Event(scheduler.now(), EventType::GenerateRequest, node_id_));
     }

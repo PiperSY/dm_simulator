@@ -1,29 +1,65 @@
 #include "sim/simulator.hpp"
 
+#include <memory>
 #include <stdexcept>
+#include <unordered_set>
+
+#include "cache/cache_policy.hpp"
+#include "cache/local_cache.hpp"
+#include "cache/lru_policy.hpp"
 
 namespace dm_sim {
 
+namespace {
+
+// Factory function to create cache policy instances based on the specified policy type.
+std::unique_ptr<CachePolicy> make_cache_policy(LocalCachePolicyType policy_type) {
+    switch (policy_type) {
+    case LocalCachePolicyType::AlwaysRemote:
+        return std::make_unique<AlwaysRemotePolicy>();
+    case LocalCachePolicyType::Lru:
+        return std::make_unique<LruPolicy>();
+    }
+
+    throw std::invalid_argument("Unknown local cache policy type");
+}
+
+}  // namespace
+
+
 Simulator::Simulator(SimulationConfig config)
     : config_(std::move(config)),
-      compute_node_(config_.compute_node_id,
-                    config_.memory_node_id,
-                    config_,
-                    next_request_id_,
-                    request_table_,
-                    responses_,
-                    stats_),
-      memory_node_(config_.memory_node_id, config_, request_table_) {
+      memory_node_(config_.memory_node_id, config_, stats_, request_table_) {
+    validate_config();
+
     if (config_.memory_bandwidth_bytes_per_time == 0) {
         throw std::invalid_argument(
             "memory_bandwidth_bytes_per_time must be greater than zero");
     }
+
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        compute_nodes_.emplace(
+            node_config.node_id,
+            std::make_unique<ComputeNode>(node_config.node_id,
+                                          config_.memory_node_id,
+                                          node_config.requests,
+                                          config_.one_way_link_latency,
+                                          config_.local_cache.hit_latency,
+                                          LocalCache(
+                                              config_.local_cache.capacity_bytes,
+                                              make_cache_policy(config_.local_cache.policy_type)),
+                                          next_request_id_,
+                                          request_table_,
+                                          responses_,
+                                          stats_));
+    }
 }
 
 void Simulator::run() {
-    if (!config_.requests.empty()) {
-        scheduler_.schedule(
-            Event(0, EventType::GenerateRequest, config_.compute_node_id));
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        if (!node_config.requests.empty()) {
+            scheduler_.schedule(Event(0, EventType::GenerateRequest, node_config.node_id));
+        }
     }
 
     scheduler_.run_until_empty([this](const Event& event, Scheduler& scheduler) {
@@ -47,8 +83,13 @@ const std::vector<EventRecord>& Simulator::event_log() const noexcept {
     return event_log_;
 }
 
-const ComputeNode& Simulator::compute_node() const noexcept {
-    return compute_node_;
+const ComputeNode& Simulator::compute_node(NodeId node_id) const {
+    const auto it = compute_nodes_.find(node_id);
+    if (it == compute_nodes_.end()) {
+        throw std::out_of_range("Unknown compute node ID");
+    }
+
+    return *(it->second);
 }
 
 const MemoryNode& Simulator::memory_node() const noexcept {
@@ -63,8 +104,9 @@ void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
     event_log_.push_back(
         EventRecord{event.time, event.type, event.target_id, event.request_id});
 
-    if (event.target_id == config_.compute_node_id) {
-        compute_node_.handle_event(event, scheduler);
+    const auto compute_it = compute_nodes_.find(event.target_id);
+    if (compute_it != compute_nodes_.end()) {
+        compute_it->second->handle_event(event, scheduler);
         return;
     }
 
@@ -74,6 +116,22 @@ void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
     }
 
     throw std::logic_error("Unknown target_id in simulator dispatch");
+}
+
+void Simulator::validate_config() const {
+    std::unordered_set<NodeId> seen_compute_node_ids;
+
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        if (node_config.node_id == config_.memory_node_id) {
+            throw std::invalid_argument(
+                "Compute node ID must not match the memory node ID");
+        }
+
+        const auto [_, inserted] = seen_compute_node_ids.insert(node_config.node_id);
+        if (!inserted) {
+            throw std::invalid_argument("Compute node IDs must be unique");
+        }
+    }
 }
 
 }  // namespace dm_sim

@@ -12,6 +12,8 @@ add_library(dm_sim_core
     src/sim/event.cpp
     src/sim/scheduler.cpp
     src/sim/simulator.cpp
+    src/cache/local_cache.cpp
+    src/cache/lru_policy.cpp
     src/nodes/compute_node.cpp
     src/nodes/memory_node.cpp
     src/metrics/stats.cpp
@@ -52,3 +54,14 @@ target_link_libraries(test_request_path
 )
 
 add_test(NAME request_path COMMAND test_request_path)
+
+add_executable(test_cache
+    tests/test_cache.cpp
+)
+
+target_link_libraries(test_cache
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME cache COMMAND test_cache)

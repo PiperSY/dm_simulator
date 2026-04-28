@@ -31,6 +31,7 @@ struct Request {
     SimTime issue_time = 0;
     std::uint64_t size_bytes = 0;
     RequestStage current_stage = RequestStage::Generated;
+    SimTime memory_enqueue_time = 0;
 };
 
 }  // namespace dm_sim
