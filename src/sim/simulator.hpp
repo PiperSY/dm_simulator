@@ -50,6 +50,7 @@ public:
     [[nodiscard]] const MemoryNode& memory_node() const noexcept;
     // Returns a constant reference to the simulation configuration used to initialize the simulator.
     [[nodiscard]] const SimulationConfig& config() const noexcept;
+    // Returns a constant reference to the generated workload, if one was generated as part of the simulation configuration.
     [[nodiscard]] const std::optional<GeneratedWorkload>& generated_workload()
         const noexcept;
 
@@ -66,6 +67,7 @@ private:
     std::unordered_map<RequestId, Request> request_table_;
     std::vector<Response> responses_;
     Stats stats_;
+    GlobalReplicaPlan global_replica_plan_;
     std::unordered_map<NodeId, std::unique_ptr<ComputeNode>> compute_nodes_;
     MemoryNode memory_node_;
     std::vector<EventRecord> event_log_;

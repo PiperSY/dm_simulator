@@ -1,10 +1,15 @@
 #include "sim/simulator.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "cache/cache_policy.hpp"
+#include "cache/hotness_policy.hpp"
 #include "cache/local_cache.hpp"
 #include "cache/lru_policy.hpp"
 #include "workloads/generators.hpp"
@@ -14,15 +19,87 @@ namespace dm_sim {
 namespace {
 
 // Factory function to create cache policy instances based on the specified policy type.
-std::unique_ptr<CachePolicy> make_cache_policy(LocalCachePolicyType policy_type) {
-    switch (policy_type) {
+std::unique_ptr<CachePolicy> make_cache_policy(
+    const LocalCacheConfig& local_cache_config) {
+    switch (local_cache_config.policy_type) {
     case LocalCachePolicyType::AlwaysRemote:
         return std::make_unique<AlwaysRemotePolicy>();
     case LocalCachePolicyType::Lru:
         return std::make_unique<LruPolicy>();
+    case LocalCachePolicyType::HotnessOnly:
+        return std::make_unique<HotnessOnlyPolicy>(local_cache_config.hotness);
+    case LocalCachePolicyType::GlobalHottestReplication:
+        return std::make_unique<GlobalHottestReplicationPolicy>();
     }
 
     throw std::invalid_argument("Unknown local cache policy type");
+}
+/*********************************** 
+ * Builds a global replica plan based on the access patterns of compute nodes across epochs. 
+ * The plan identifies which objects should be replicated in the local cache for each epoch, prioritizing objects with higher request counts.
+ * This function processes the request specifications of all compute nodes to determine the demand for each object in each epoch and generates 
+ *   a sorted list of replicas to be installed in the local cache according to the GlobalHottestReplicationPolicy.
+ ***********************************/
+GlobalReplicaPlan build_global_replica_plan(
+    const std::vector<ComputeNodeConfig>& compute_nodes) {
+    // Tracks how often one object is requested during one epoch, plus the
+    // largest observed object size needed to reserve cache space for it.
+    struct ObjectDemand {
+        std::uint64_t request_count = 0;
+        std::uint64_t size_bytes = 0;
+    };
+
+    // First pass: group all requests by epoch, then by object ID, so the
+    // replication policy can rank objects using global demand.
+    std::unordered_map<EpochId, std::unordered_map<ObjectId, ObjectDemand>>
+        demand_by_epoch;
+
+    for (const ComputeNodeConfig& node_config : compute_nodes) {
+        for (const RequestSpec& request : node_config.requests) {
+            ObjectDemand& demand =
+                demand_by_epoch[request.epoch_id][request.object_id];
+            ++demand.request_count;
+            demand.size_bytes = std::max(demand.size_bytes, request.size_bytes);
+        }
+    }
+
+    // Second pass: convert each epoch's demand table into an ordered replica
+    // list that LocalCache::install_replicas can consume.
+    GlobalReplicaPlan plan;
+    for (const auto& epoch_entry : demand_by_epoch) {
+        std::vector<CacheReplica> replicas;
+        replicas.reserve(epoch_entry.second.size());
+
+        // A replica carries only the object identity and size. The request
+        // count stays in epoch_entry.second and is used only for sorting.
+        for (const auto& object_entry : epoch_entry.second) {
+            replicas.push_back(CacheReplica{
+                object_entry.first,
+                object_entry.second.size_bytes,
+            });
+        }
+
+        // Put the hottest objects first. Ties are deterministic so repeated
+        // runs produce the same replica order.
+        std::sort(replicas.begin(),
+                  replicas.end(),
+                  [&epoch_entry](const CacheReplica& lhs,
+                                 const CacheReplica& rhs) {
+                      const std::uint64_t lhs_count =
+                          epoch_entry.second.at(lhs.object_id).request_count;
+                      const std::uint64_t rhs_count =
+                          epoch_entry.second.at(rhs.object_id).request_count;
+                      if (lhs_count != rhs_count) {
+                          return lhs_count > rhs_count;
+                      }
+
+                      return lhs.object_id < rhs.object_id;
+                  });
+
+        plan[epoch_entry.first] = std::move(replicas);
+    }
+
+    return plan;
 }
 
 }  // namespace
@@ -54,6 +131,17 @@ Simulator::Simulator(SimulationConfig config)
             "memory_bandwidth_bytes_per_time must be greater than zero");
     }
 
+    if (config_.local_cache.policy_type ==
+        LocalCachePolicyType::GlobalHottestReplication) {
+        global_replica_plan_ = build_global_replica_plan(config_.compute_nodes);
+    }
+
+    const GlobalReplicaPlan* replica_plan =
+        config_.local_cache.policy_type ==
+                LocalCachePolicyType::GlobalHottestReplication
+            ? &global_replica_plan_
+            : nullptr;
+
     for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
         compute_nodes_.emplace(
             node_config.node_id,
@@ -64,7 +152,8 @@ Simulator::Simulator(SimulationConfig config)
                                           config_.local_cache.hit_latency,
                                           LocalCache(
                                               config_.local_cache.capacity_bytes,
-                                              make_cache_policy(config_.local_cache.policy_type)),
+                                              make_cache_policy(config_.local_cache)),
+                                          replica_plan,
                                           next_request_id_,
                                           request_table_,
                                           responses_,
@@ -141,6 +230,13 @@ void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
 }
 
 void Simulator::validate_config() const {
+    if (config_.local_cache.policy_type ==
+            LocalCachePolicyType::GlobalHottestReplication &&
+        !generated_workload_.has_value()) {
+        throw std::invalid_argument(
+            "Global hottest replication requires synthetic_workload");
+    }
+
     std::unordered_set<NodeId> seen_compute_node_ids;
 
     for (const ComputeNodeConfig& node_config : config_.compute_nodes) {

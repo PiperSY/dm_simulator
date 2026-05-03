@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "cache/cache_entry.hpp"
 #include "cache/cache_policy.hpp"
@@ -11,6 +12,13 @@
 #include "model/response.hpp"
 
 namespace dm_sim {
+
+struct CacheReplica {
+    ObjectId object_id = 0;
+    std::uint64_t size_bytes = 0;
+};
+
+using GlobalReplicaPlan = std::unordered_map<EpochId, std::vector<CacheReplica>>;
 
 /*********************************** 
  * LocalCache class represents a local cache in the simulation. It manages cache entries, tracks occupancy and hit/miss statistics, 
@@ -30,10 +38,16 @@ public:
 
     // Lookup an object in the cache, updating hit/miss statistics and access times as appropriate. 
     [[nodiscard]] bool lookup(ObjectId object_id, SimTime access_time);
+    [[nodiscard]] bool lookup(const Request& request, SimTime access_time);
     // Attempt to admit a new entry into the cache based on the given request and response, using the cache policy to determine admission and eviction.
     [[nodiscard]] bool admit(const Request& request,
                              const Response& response,
                              SimTime access_time);
+    // Handle the start of a new epoch -> update state as needed for the new epoch.
+    void on_epoch_start(EpochId epoch_id);
+    // Install a set of cache replicas into the local cache, evicting existing entries as needed to make space.
+    void install_replicas(const std::vector<CacheReplica>& replicas,
+                          SimTime install_time);
     // Check if the cache contains an entry for the specified object ID.
     [[nodiscard]] bool contains(ObjectId object_id) const noexcept;
     // Retrieve a constant reference to the cache entry for the specified object ID, if it exists.
@@ -52,6 +66,8 @@ public:
 private:
     // Evict the specified object from the cache, updating occupancy and eviction statistics accordingly.
     void evict(ObjectId object_id);
+    // Clear all entries from the cache, resetting occupancy and statistics. Used when installing new replicas for a new epoch.
+    void clear_entries();
 
     // Cache capacity in bytes, current occupancy in bytes, hit/miss statistics, and the cache policy used for admission and eviction decisions.
     std::size_t capacity_bytes_ = 0;

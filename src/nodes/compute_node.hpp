@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,7 @@ public:
                 SimTime one_way_link_latency,
                 SimTime local_cache_hit_latency,
                 LocalCache local_cache,
+                const GlobalReplicaPlan* global_replica_plan,
                 RequestId& next_request_id,
                 std::unordered_map<RequestId, Request>& request_table,
                 std::vector<Response>& responses,
@@ -42,6 +44,7 @@ public:
     [[nodiscard]] std::size_t outstanding_requests() const noexcept;
     /// Returns the total number of requests that have been issued by this compute node. Tracks the progress of the workload execution.
     [[nodiscard]] std::size_t issued_requests() const noexcept;
+    [[nodiscard]] const LocalCache& local_cache() const noexcept;
 
 private:
     // Event handler methods for different event types, including request generation, local cache lookups, cache hit completions, response handling, and request completion.
@@ -50,6 +53,7 @@ private:
     void handle_local_cache_hit_complete(const Event& event, Scheduler& scheduler);
     void handle_return_response(const Event& event, Scheduler& scheduler);
     void handle_request_complete(const Event& event, Scheduler& scheduler);
+    void start_epoch_if_needed(EpochId epoch_id, SimTime event_time);
 
     // Compute node attributes, including its ID, associated memory node ID, workload cursor for generating requests, latencies for link and cache hits, 
     //   local cache instance, references to shared request table and responses vector, statistics collector, and counters for outstanding and issued requests.
@@ -59,10 +63,12 @@ private:
     SimTime one_way_link_latency_ = 0;
     SimTime local_cache_hit_latency_ = 0;
     LocalCache local_cache_;
+    const GlobalReplicaPlan* global_replica_plan_ = nullptr;
     RequestId& next_request_id_;
     std::unordered_map<RequestId, Request>& request_table_;
     std::vector<Response>& responses_;
     Stats& stats_;
+    std::optional<EpochId> current_epoch_;
     std::size_t outstanding_requests_ = 0;
 };
 

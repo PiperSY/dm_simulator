@@ -18,6 +18,13 @@ namespace dm_sim {
 enum class LocalCachePolicyType {
     AlwaysRemote,
     Lru,
+    HotnessOnly,
+    GlobalHottestReplication,
+};
+
+struct HotnessPolicyConfig {
+    std::uint64_t min_admit_count = 2;
+    bool reset_on_epoch_change = true;
 };
 
 /*********************************** 
@@ -30,6 +37,7 @@ struct LocalCacheConfig {
     std::uint64_t capacity_bytes = 0;
     SimTime hit_latency = 1;
     LocalCachePolicyType policy_type = LocalCachePolicyType::AlwaysRemote;
+    HotnessPolicyConfig hotness;
 };
 
 /*********************************** 

@@ -1,0 +1,31 @@
+experiment:
+  name: hotness_only_baseline
+  output_dir: results/hotness_only_baseline
+
+memory:
+  node_id: 99
+  base_latency: 25
+  bandwidth_bytes_per_time: 16
+
+link:
+  one_way_latency: 6
+
+local_cache:
+  capacity_bytes: 256
+  hit_latency: 1
+  policy: hotness_only
+  hotness:
+    min_admit_count: 2
+    reset_on_epoch_change: true
+
+workload:
+  seed: 6262
+  compute_node_ids: [1, 2, 3, 4]
+  object_count: 128
+  object_size_bytes: 64
+  requests_per_node_per_epoch: 16
+  epoch_count: 3
+  hot_set_size: 8
+  hot_access_probability: 0.8
+  hot_set_mode: epoch_shift
+  cross_node_overlap: medium
