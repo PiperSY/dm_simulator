@@ -1,0 +1,175 @@
+#include "sim/config_loader.hpp"
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+
+#include <yaml-cpp/yaml.h>
+
+namespace dm_sim {
+
+namespace {
+
+// Helper function to retrieve a required child node from a YAML node, throwing an exception if the child is missing.
+YAML::Node required_child(const YAML::Node& node,
+                          const std::string& key,
+                          const std::string& context) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        throw std::invalid_argument("Missing required config field: " +
+                                    context + "." + key);
+    }
+
+    return child;
+}
+
+// Template function to retrieve a required child node and convert it to the specified type, throwing an exception if the conversion fails.
+template <typename T>
+T required_as(const YAML::Node& node,
+              const std::string& key,
+              const std::string& context) {
+    const YAML::Node child = required_child(node, key, context);
+    try {
+        return child.as<T>();
+    } catch (const YAML::Exception& error) {
+        throw std::invalid_argument("Invalid value for config field " +
+                                    context + "." + key + ": " +
+                                    error.what());
+    }
+}
+
+// Parses the local cache policy type from a string value, throwing an exception if the value is invalid.
+LocalCachePolicyType parse_local_cache_policy(const std::string& value) {
+    if (value == "always_remote") {
+        return LocalCachePolicyType::AlwaysRemote;
+    }
+    if (value == "lru") {
+        return LocalCachePolicyType::Lru;
+    }
+
+    throw std::invalid_argument(
+        "Invalid local_cache.policy: expected always_remote or lru");
+}
+
+// Parses the hot set mode from a string value, throwing an exception if the value is invalid.
+HotSetMode parse_hot_set_mode(const std::string& value) {
+    if (value == "static") {
+        return HotSetMode::Static;
+    }
+    if (value == "epoch_shift") {
+        return HotSetMode::EpochShift;
+    }
+
+    throw std::invalid_argument(
+        "Invalid workload.hot_set_mode: expected static or epoch_shift");
+}
+
+// Parses the cross-node overlap level from a string value, throwing an exception if the value is invalid.
+CrossNodeOverlap parse_cross_node_overlap(const std::string& value) {
+    if (value == "low") {
+        return CrossNodeOverlap::Low;
+    }
+    if (value == "medium") {
+        return CrossNodeOverlap::Medium;
+    }
+    if (value == "high") {
+        return CrossNodeOverlap::High;
+    }
+
+    throw std::invalid_argument(
+        "Invalid workload.cross_node_overlap: expected low, medium, or high");
+}
+
+// Parses a list of compute node IDs from a YAML node, throwing an exception if the node is not a sequence or if any ID cannot be converted to the expected type.
+std::vector<NodeId> parse_compute_node_ids(const YAML::Node& workload_node) {
+    const YAML::Node ids_node =
+        required_child(workload_node, "compute_node_ids", "workload");
+    if (!ids_node.IsSequence()) {
+        throw std::invalid_argument(
+            "Invalid workload.compute_node_ids: expected a YAML sequence");
+    }
+
+    std::vector<NodeId> node_ids;
+    node_ids.reserve(ids_node.size());
+    for (const YAML::Node& id_node : ids_node) {
+        node_ids.push_back(id_node.as<NodeId>());
+    }
+
+    return node_ids;
+}
+
+}  // namespace
+
+// Loads the experiment configuration from a YAML file at the specified path, constructing an ExperimentConfig instance with the parsed values.
+ExperimentConfig load_experiment_config(const std::string& path) {
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(path);
+    } catch (const YAML::Exception& error) {
+        throw std::invalid_argument("Failed to load config file " + path +
+                                    ": " + error.what());
+    }
+
+    const YAML::Node experiment_node =
+        required_child(root, "experiment", "root");
+    const YAML::Node memory_node = required_child(root, "memory", "root");
+    const YAML::Node link_node = required_child(root, "link", "root");
+    const YAML::Node local_cache_node =
+        required_child(root, "local_cache", "root");
+    const YAML::Node workload_node = required_child(root, "workload", "root");
+
+    ExperimentConfig experiment;
+    experiment.name =
+        required_as<std::string>(experiment_node, "name", "experiment");
+    experiment.output_dir =
+        required_as<std::string>(experiment_node, "output_dir", "experiment");
+
+    SimulationConfig simulation;
+    simulation.memory_node_id =
+        required_as<NodeId>(memory_node, "node_id", "memory");
+    simulation.memory_base_latency =
+        required_as<SimTime>(memory_node, "base_latency", "memory");
+    simulation.memory_bandwidth_bytes_per_time =
+        required_as<std::uint64_t>(
+            memory_node, "bandwidth_bytes_per_time", "memory");
+    simulation.one_way_link_latency =
+        required_as<SimTime>(link_node, "one_way_latency", "link");
+    simulation.local_cache = LocalCacheConfig{
+        required_as<std::uint64_t>(
+            local_cache_node, "capacity_bytes", "local_cache"),
+        required_as<SimTime>(local_cache_node, "hit_latency", "local_cache"),
+        parse_local_cache_policy(required_as<std::string>(
+            local_cache_node, "policy", "local_cache")),
+    };
+
+    SyntheticWorkloadConfig workload;
+    workload.seed = required_as<std::uint64_t>(workload_node, "seed", "workload");
+    workload.compute_node_ids = parse_compute_node_ids(workload_node);
+    workload.object_count =
+        required_as<std::uint64_t>(workload_node, "object_count", "workload");
+    workload.object_size_bytes = required_as<std::uint64_t>(
+        workload_node, "object_size_bytes", "workload");
+    workload.requests_per_node_per_epoch = required_as<std::size_t>(
+        workload_node, "requests_per_node_per_epoch", "workload");
+    workload.epoch_count =
+        required_as<EpochId>(workload_node, "epoch_count", "workload");
+    workload.hot_set_size =
+        required_as<std::size_t>(workload_node, "hot_set_size", "workload");
+    workload.hot_access_probability = required_as<double>(
+        workload_node, "hot_access_probability", "workload");
+    workload.hot_set_mode = parse_hot_set_mode(
+        required_as<std::string>(workload_node, "hot_set_mode", "workload"));
+    workload.cross_node_overlap = parse_cross_node_overlap(
+        required_as<std::string>(
+            workload_node, "cross_node_overlap", "workload"));
+    simulation.synthetic_workload = workload;
+
+    experiment.simulation = simulation;
+    return experiment;
+}
+
+SimulationConfig load_simulation_config(const std::string& path) {
+    return load_experiment_config(path).simulation;
+}
+
+}  // namespace dm_sim

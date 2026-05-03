@@ -1,44 +1,73 @@
 #include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
 
-#include "sim/config.hpp"
-#include "sim/simulator.hpp"
-#include "workloads/workload.hpp"
+#include "experiments/runner.hpp"
 
-int main() {
-    dm_sim::SyntheticWorkloadConfig workload;
-    workload.seed = 2026;
-    workload.compute_node_ids = {1, 2};
-    workload.object_count = 32;
-    workload.object_size_bytes = 32;
-    workload.requests_per_node_per_epoch = 4;
-    workload.epoch_count = 2;
-    workload.hot_set_size = 4;
-    workload.hot_access_probability = 0.85;
-    workload.hot_set_mode = dm_sim::HotSetMode::EpochShift;
-    workload.cross_node_overlap = dm_sim::CrossNodeOverlap::High;
+namespace {
 
-    dm_sim::SimulationConfig config;
-    config.memory_node_id = 99;
-    config.one_way_link_latency = 5;
-    config.memory_base_latency = 20;
-    config.memory_bandwidth_bytes_per_time = 16;
-    config.local_cache = dm_sim::LocalCacheConfig{
-        128,
-        1,
-        dm_sim::LocalCachePolicyType::Lru,
-    };
-    config.synthetic_workload = workload;
+void print_usage(const char* program_name) {
+    std::cout << "Usage: " << program_name
+              << " --config <path> [--output-dir <path>]\n";
+}
 
-    dm_sim::Simulator simulator(config);
-    simulator.run();
+}  // namespace
 
-    std::cout << "Completed requests: "
-              << simulator.stats().completed_requests() << "\n";
-    std::cout << "Average latency: " << simulator.stats().average_latency() << "\n";
-    std::cout << "Memory average wait: "
-              << simulator.stats().average_memory_wait() << "\n";
-    std::cout << "Local cache hit rate: "
-              << simulator.stats().local_cache_hit_rate() << "\n";
+int main(int argc, char* argv[]) {
+    std::string config_path;
+    std::optional<std::string> output_dir;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        }
+        if (arg == "--config") {
+            if (i + 1 >= argc) {
+                std::cerr << "--config requires a path\n";
+                return 1;
+            }
+            config_path = argv[++i];
+            continue;
+        }
+        if (arg == "--output-dir") {
+            if (i + 1 >= argc) {
+                std::cerr << "--output-dir requires a path\n";
+                return 1;
+            }
+            output_dir = argv[++i];
+            continue;
+        }
+
+        std::cerr << "Unknown argument: " << arg << "\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (config_path.empty()) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    try {
+        const dm_sim::ExperimentRunner runner;
+        const dm_sim::ExperimentResult result =
+            runner.run_config(config_path, output_dir);
+
+        std::cout << "Experiment: " << result.summary.experiment_name << "\n";
+        std::cout << "Output directory: " << result.output_dir << "\n";
+        std::cout << "Completed requests: "
+                  << result.summary.completed_requests << "\n";
+        std::cout << "Mean latency: " << result.summary.mean_latency << "\n";
+        std::cout << "P95 latency: " << result.summary.p95_latency << "\n";
+        std::cout << "Local cache hit rate: "
+                  << result.summary.local_cache_hit_rate << "\n";
+    } catch (const std::exception& error) {
+        std::cerr << "Experiment failed: " << error.what() << "\n";
+        return 1;
+    }
 
     return 0;
 }
