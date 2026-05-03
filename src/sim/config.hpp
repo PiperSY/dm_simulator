@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "model/request.hpp"
 #include "sim/types.hpp"
+#include "workloads/workload.hpp"
 
 namespace dm_sim {
 
@@ -56,6 +58,7 @@ struct SimulationConfig {
     SimTime memory_base_latency = 20;
     std::uint64_t memory_bandwidth_bytes_per_time = 16;
     LocalCacheConfig local_cache;
+    std::optional<SyntheticWorkloadConfig> synthetic_workload;
 };
 
 }  // namespace dm_sim

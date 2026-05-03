@@ -7,6 +7,7 @@
 #include "cache/cache_policy.hpp"
 #include "cache/local_cache.hpp"
 #include "cache/lru_policy.hpp"
+#include "workloads/generators.hpp"
 
 namespace dm_sim {
 
@@ -30,6 +31,22 @@ std::unique_ptr<CachePolicy> make_cache_policy(LocalCachePolicyType policy_type)
 Simulator::Simulator(SimulationConfig config)
     : config_(std::move(config)),
       memory_node_(config_.memory_node_id, config_, stats_, request_table_) {
+    if (config_.synthetic_workload.has_value()) {
+        if (!config_.compute_nodes.empty()) {
+            throw std::invalid_argument(
+                "Use either synthetic_workload or explicit compute_nodes, not both");
+        }
+
+        generated_workload_ =
+            generate_synthetic_workload(*config_.synthetic_workload);
+        config_.compute_nodes.reserve(generated_workload_->node_workloads.size());
+        for (const NodeWorkload& node_workload :
+             generated_workload_->node_workloads) {
+            config_.compute_nodes.push_back(
+                ComputeNodeConfig{node_workload.node_id, node_workload.requests});
+        }
+    }
+
     validate_config();
 
     if (config_.memory_bandwidth_bytes_per_time == 0) {
@@ -42,7 +59,7 @@ Simulator::Simulator(SimulationConfig config)
             node_config.node_id,
             std::make_unique<ComputeNode>(node_config.node_id,
                                           config_.memory_node_id,
-                                          node_config.requests,
+                                          WorkloadCursor(node_config.requests),
                                           config_.one_way_link_latency,
                                           config_.local_cache.hit_latency,
                                           LocalCache(
@@ -98,6 +115,11 @@ const MemoryNode& Simulator::memory_node() const noexcept {
 
 const SimulationConfig& Simulator::config() const noexcept {
     return config_;
+}
+
+const std::optional<GeneratedWorkload>& Simulator::generated_workload()
+    const noexcept {
+    return generated_workload_;
 }
 
 void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -49,6 +50,8 @@ public:
     [[nodiscard]] const MemoryNode& memory_node() const noexcept;
     // Returns a constant reference to the simulation configuration used to initialize the simulator.
     [[nodiscard]] const SimulationConfig& config() const noexcept;
+    [[nodiscard]] const std::optional<GeneratedWorkload>& generated_workload()
+        const noexcept;
 
 private:
     // Dispatches the given event to the appropriate node (compute or memory) based on the event's target ID.
@@ -57,6 +60,7 @@ private:
     void validate_config() const;
 
     SimulationConfig config_;
+    std::optional<GeneratedWorkload> generated_workload_;
     Scheduler scheduler_;
     RequestId next_request_id_ = 1;
     std::unordered_map<RequestId, Request> request_table_;

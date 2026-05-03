@@ -11,6 +11,11 @@ enum class ServedFromTier {
     Memory,
 };
 
+/*********************************** 
+ * Response struct represents the response to a memory request in the simulation, containing details such as the associated request ID, 
+ * object ID, the tier from which the request was served (local cache or memory), completion time, total latency, and bytes transferred. 
+ * The Response struct is used to track the outcome of a request and its performance characteristics.
+ ***********************************/
 struct Response {
     RequestId request_id = kInvalidRequestId;
     ObjectId object_id = 0;

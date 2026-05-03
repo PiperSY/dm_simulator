@@ -1,6 +1,7 @@
 #include "nodes/compute_node.hpp"
 
 #include <stdexcept>
+#include <utility>
 
 #include "sim/scheduler.hpp"
 
@@ -8,7 +9,7 @@ namespace dm_sim {
 
 ComputeNode::ComputeNode(NodeId node_id,
                          NodeId memory_node_id,
-                         const std::vector<RequestSpec>& requests,
+                         WorkloadCursor workload,
                          SimTime one_way_link_latency,
                          SimTime local_cache_hit_latency,
                          LocalCache local_cache,
@@ -18,7 +19,7 @@ ComputeNode::ComputeNode(NodeId node_id,
                          Stats& stats)
     : node_id_(node_id),
       memory_node_id_(memory_node_id),
-      requests_(requests),
+      workload_(std::move(workload)),
       one_way_link_latency_(one_way_link_latency),
       local_cache_hit_latency_(local_cache_hit_latency),
       local_cache_(std::move(local_cache)),
@@ -54,16 +55,16 @@ std::size_t ComputeNode::outstanding_requests() const noexcept {
 }
 
 std::size_t ComputeNode::issued_requests() const noexcept {
-    return next_request_index_;
+    return workload_.issued_count();
 }
 
 void ComputeNode::handle_generate_request(const Event& event,
                                           Scheduler& scheduler) {
-    if (next_request_index_ >= requests_.size()) {
+    if (!workload_.has_next()) {
         return;
     }
 
-    const RequestSpec& spec = requests_[next_request_index_++];
+    const RequestSpec spec = workload_.next();
     const RequestId request_id = next_request_id_++;
 
     Request request;
@@ -73,6 +74,7 @@ void ComputeNode::handle_generate_request(const Event& event,
     request.operation_type = OperationType::Read;
     request.issue_time = event.time;
     request.size_bytes = spec.size_bytes;
+    request.epoch_id = spec.epoch_id;
     request.current_stage = RequestStage::Generated;
 
     request_table_[request_id] = request;
@@ -164,7 +166,7 @@ void ComputeNode::handle_request_complete(const Event& event,
                                           Scheduler& scheduler) {
     (void)event;
 
-    if (next_request_index_ < requests_.size()) {
+    if (workload_.has_next()) {
         scheduler.schedule(
             Event(scheduler.now(), EventType::GenerateRequest, node_id_));
     }

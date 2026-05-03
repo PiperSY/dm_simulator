@@ -8,6 +8,7 @@
 #include "model/response.hpp"
 #include "sim/config.hpp"
 #include "sim/simulator.hpp"
+#include "workloads/workload.hpp"
 
 namespace {
 
@@ -24,6 +25,9 @@ using dm_sim::ServedFromTier;
 using dm_sim::SimulationConfig;
 using dm_sim::Simulator;
 using dm_sim::SimTime;
+using dm_sim::CrossNodeOverlap;
+using dm_sim::HotSetMode;
+using dm_sim::SyntheticWorkloadConfig;
 
 std::size_t count_event_type(const std::vector<EventRecord>& event_log,
                              EventType type) {
@@ -267,6 +271,137 @@ void test_invalid_config_rejects_duplicate_compute_ids() {
     }
 }
 
+void test_synthetic_workload_runs_to_completion_with_epoch_metadata() {
+    SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    SyntheticWorkloadConfig workload;
+    workload.seed = 7;
+    workload.compute_node_ids = {1, 2};
+    workload.object_count = 16;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 2;
+    workload.epoch_count = 2;
+    workload.hot_set_size = 2;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::EpochShift;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    config.synthetic_workload = workload;
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.generated_workload().has_value());
+    assert(simulator.config().compute_nodes.size() == 2);
+    assert(simulator.stats().completed_requests() == 8);
+    assert(simulator.stats().completed_requests(1) == 4);
+    assert(simulator.stats().completed_requests(2) == 4);
+    assert(simulator.stats().local_cache_hits() == 0);
+    assert(simulator.stats().local_cache_misses() == 8);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 8);
+
+    std::size_t epoch_zero_requests = 0;
+    std::size_t epoch_one_requests = 0;
+    for (const auto& entry : simulator.requests()) {
+        const Request& request = entry.second;
+        assert(request.current_stage == RequestStage::Completed);
+        assert(request.source_node_id == 1 || request.source_node_id == 2);
+        assert(request.epoch_id == 0 || request.epoch_id == 1);
+        if (request.epoch_id == 0) {
+            ++epoch_zero_requests;
+        } else {
+            ++epoch_one_requests;
+        }
+    }
+
+    assert(epoch_zero_requests == 4);
+    assert(epoch_one_requests == 4);
+}
+
+void test_synthetic_high_overlap_lru_repeated_reads_hit_locally() {
+    SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        64,
+        1,
+        LocalCachePolicyType::Lru,
+    };
+
+    SyntheticWorkloadConfig workload;
+    workload.seed = 11;
+    workload.compute_node_ids = {1, 2};
+    workload.object_count = 8;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 3;
+    workload.epoch_count = 1;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::Static;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    config.synthetic_workload = workload;
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 6);
+    assert(simulator.stats().local_cache_misses() == 2);
+    assert(simulator.stats().local_cache_hits() == 4);
+    assert(simulator.stats().local_cache_misses(1) == 1);
+    assert(simulator.stats().local_cache_misses(2) == 1);
+    assert(simulator.stats().local_cache_hits(1) == 2);
+    assert(simulator.stats().local_cache_hits(2) == 2);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 2);
+    assert(count_event_type(simulator.event_log(), EventType::LocalCacheHitComplete) == 4);
+}
+
+void test_synthetic_always_remote_sends_all_reads_to_memory() {
+    SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        64,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    SyntheticWorkloadConfig workload;
+    workload.seed = 11;
+    workload.compute_node_ids = {1, 2};
+    workload.object_count = 8;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 3;
+    workload.epoch_count = 1;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::Static;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    config.synthetic_workload = workload;
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 6);
+    assert(simulator.stats().local_cache_hits() == 0);
+    assert(simulator.stats().local_cache_misses() == 6);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 6);
+    for (const Response& response : simulator.responses()) {
+        assert(response.served_from_tier == ServedFromTier::Memory);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -276,5 +411,8 @@ int main() {
     test_repeated_reads_under_lru_hit_locally_after_first_miss();
     test_multi_node_private_lru_caches_still_work();
     test_invalid_config_rejects_duplicate_compute_ids();
+    test_synthetic_workload_runs_to_completion_with_epoch_metadata();
+    test_synthetic_high_overlap_lru_repeated_reads_hit_locally();
+    test_synthetic_always_remote_sends_all_reads_to_memory();
     return 0;
 }

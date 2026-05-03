@@ -17,6 +17,8 @@ add_library(dm_sim_core
     src/nodes/compute_node.cpp
     src/nodes/memory_node.cpp
     src/metrics/stats.cpp
+    src/workloads/workload.cpp
+    src/workloads/generators.cpp
 )
 
 target_include_directories(dm_sim_core
@@ -65,3 +67,14 @@ target_link_libraries(test_cache
 )
 
 add_test(NAME cache COMMAND test_cache)
+
+add_executable(test_workload
+    tests/test_workload.cpp
+)
+
+target_link_libraries(test_workload
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME workload COMMAND test_workload)
