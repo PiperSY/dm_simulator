@@ -1,0 +1,161 @@
+#include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "sim/config_loader.hpp"
+
+namespace {
+
+using dm_sim::CrossNodeOverlap;
+using dm_sim::ExperimentConfig;
+using dm_sim::HotSetMode;
+using dm_sim::LocalCachePolicyType;
+using dm_sim::SimulationConfig;
+
+std::filesystem::path write_temp_config(const std::string& name,
+                                        const std::string& contents) {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / name;
+    std::ofstream output(path);
+    output << contents;
+    return path;
+}
+
+std::string valid_config_text() {
+    return R"(experiment:
+  name: loader_test
+  output_dir: /tmp/dm_sim_loader_test_results
+
+memory:
+  node_id: 99
+  base_latency: 20
+  bandwidth_bytes_per_time: 16
+
+link:
+  one_way_latency: 5
+
+local_cache:
+  capacity_bytes: 128
+  hit_latency: 1
+  policy: lru
+
+workload:
+  seed: 123
+  compute_node_ids: [1, 2]
+  object_count: 32
+  object_size_bytes: 16
+  requests_per_node_per_epoch: 4
+  epoch_count: 2
+  hot_set_size: 4
+  hot_access_probability: 0.75
+  hot_set_mode: epoch_shift
+  cross_node_overlap: medium
+)";
+}
+
+void test_valid_yaml_loads_experiment_and_simulation_config() {
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_valid_config.yaml", valid_config_text());
+
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+    assert(experiment.name == "loader_test");
+    assert(experiment.output_dir == "/tmp/dm_sim_loader_test_results");
+
+    const SimulationConfig& simulation = experiment.simulation;
+    assert(simulation.memory_node_id == 99);
+    assert(simulation.memory_base_latency == 20);
+    assert(simulation.memory_bandwidth_bytes_per_time == 16);
+    assert(simulation.one_way_link_latency == 5);
+    assert(simulation.local_cache.capacity_bytes == 128);
+    assert(simulation.local_cache.hit_latency == 1);
+    assert(simulation.local_cache.policy_type == LocalCachePolicyType::Lru);
+    assert(simulation.synthetic_workload.has_value());
+
+    const auto& workload = *simulation.synthetic_workload;
+    assert(workload.seed == 123);
+    assert((workload.compute_node_ids == std::vector<dm_sim::NodeId>{1, 2}));
+    assert(workload.object_count == 32);
+    assert(workload.object_size_bytes == 16);
+    assert(workload.requests_per_node_per_epoch == 4);
+    assert(workload.epoch_count == 2);
+    assert(workload.hot_set_size == 4);
+    assert(workload.hot_access_probability == 0.75);
+    assert(workload.hot_set_mode == HotSetMode::EpochShift);
+    assert(workload.cross_node_overlap == CrossNodeOverlap::Medium);
+
+    const SimulationConfig loaded_simulation =
+        dm_sim::load_simulation_config(path.string());
+    assert(loaded_simulation.memory_node_id == 99);
+}
+
+void test_enum_strings_parse() {
+    std::string config = valid_config_text();
+    const std::string from = "policy: lru";
+    const std::string to = "policy: always_remote";
+    config.replace(config.find(from), from.size(), to);
+    config.replace(config.find("hot_set_mode: epoch_shift"),
+                   std::string("hot_set_mode: epoch_shift").size(),
+                   "hot_set_mode: static");
+    config.replace(config.find("cross_node_overlap: medium"),
+                   std::string("cross_node_overlap: medium").size(),
+                   "cross_node_overlap: high");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_enum_config.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+
+    assert(experiment.simulation.local_cache.policy_type ==
+           LocalCachePolicyType::AlwaysRemote);
+    assert(experiment.simulation.synthetic_workload->hot_set_mode ==
+           HotSetMode::Static);
+    assert(experiment.simulation.synthetic_workload->cross_node_overlap ==
+           CrossNodeOverlap::High);
+}
+
+void test_missing_required_field_fails() {
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_missing_config.yaml", R"(experiment:
+  name: missing_test
+  output_dir: /tmp/missing
+)");
+
+    try {
+        (void)dm_sim::load_experiment_config(path.string());
+        assert(false);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        assert(message.find("Missing required config field") != std::string::npos);
+    }
+}
+
+void test_invalid_enum_value_fails() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: not_a_policy");
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_invalid_enum.yaml", config);
+
+    try {
+        (void)dm_sim::load_experiment_config(path.string());
+        assert(false);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        assert(message.find("local_cache.policy") != std::string::npos);
+    }
+}
+
+}  // namespace
+
+int main() {
+    test_valid_yaml_loads_experiment_and_simulation_config();
+    test_enum_strings_parse();
+    test_missing_required_field_fails();
+    test_invalid_enum_value_fails();
+    return 0;
+}

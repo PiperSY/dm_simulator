@@ -33,6 +33,8 @@ public:
     [[nodiscard]] SimTime total_latency(NodeId node_id) const noexcept;
     [[nodiscard]] double average_latency(NodeId node_id) const noexcept;
     [[nodiscard]] const std::vector<SimTime>& latencies() const noexcept;
+    [[nodiscard]] const std::vector<SimTime>& latencies(NodeId node_id)
+        const noexcept;
     [[nodiscard]] SimTime total_memory_wait() const noexcept;
     [[nodiscard]] double average_memory_wait() const noexcept;
     [[nodiscard]] SimTime max_memory_wait() const noexcept;

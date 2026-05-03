@@ -8,22 +8,38 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
 
+find_package(yaml-cpp REQUIRED)
+
+if(TARGET yaml-cpp::yaml-cpp)
+    set(DM_SIM_YAML_TARGET yaml-cpp::yaml-cpp)
+else()
+    set(DM_SIM_YAML_TARGET yaml-cpp)
+endif()
+
 add_library(dm_sim_core
     src/sim/event.cpp
     src/sim/scheduler.cpp
     src/sim/simulator.cpp
+    src/sim/config_loader.cpp
     src/cache/local_cache.cpp
     src/cache/lru_policy.cpp
     src/nodes/compute_node.cpp
     src/nodes/memory_node.cpp
     src/metrics/stats.cpp
+    src/metrics/histogram.cpp
     src/workloads/workload.cpp
     src/workloads/generators.cpp
+    src/experiments/runner.cpp
 )
 
 target_include_directories(dm_sim_core
     PUBLIC
         ${PROJECT_SOURCE_DIR}/src
+)
+
+target_link_libraries(dm_sim_core
+    PUBLIC
+        ${DM_SIM_YAML_TARGET}
 )
 
 add_executable(dm_simulator
@@ -78,3 +94,36 @@ target_link_libraries(test_workload
 )
 
 add_test(NAME workload COMMAND test_workload)
+
+add_executable(test_config_loader
+    tests/test_config_loader.cpp
+)
+
+target_link_libraries(test_config_loader
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME config_loader COMMAND test_config_loader)
+
+add_executable(test_metrics
+    tests/test_metrics.cpp
+)
+
+target_link_libraries(test_metrics
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME metrics COMMAND test_metrics)
+
+add_executable(test_experiment_runner
+    tests/test_experiment_runner.cpp
+)
+
+target_link_libraries(test_experiment_runner
+    PRIVATE
+        dm_sim_core
+)
+
+add_test(NAME experiment_runner COMMAND test_experiment_runner)

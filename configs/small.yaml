@@ -1,1 +1,28 @@
-# Placeholder configuration for a small simulation run.
+experiment:
+  name: small
+  output_dir: results/small
+
+memory:
+  node_id: 99
+  base_latency: 20
+  bandwidth_bytes_per_time: 16
+
+link:
+  one_way_latency: 5
+
+local_cache:
+  capacity_bytes: 128
+  hit_latency: 1
+  policy: lru
+
+workload:
+  seed: 2026
+  compute_node_ids: [1, 2]
+  object_count: 32
+  object_size_bytes: 32
+  requests_per_node_per_epoch: 4
+  epoch_count: 2
+  hot_set_size: 4
+  hot_access_probability: 0.85
+  hot_set_mode: epoch_shift
+  cross_node_overlap: high

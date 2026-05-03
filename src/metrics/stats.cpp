@@ -57,6 +57,16 @@ const std::vector<SimTime>& Stats::latencies() const noexcept {
     return latencies_;
 }
 
+const std::vector<SimTime>& Stats::latencies(NodeId node_id) const noexcept {
+    const auto it = per_node_stats_.find(node_id);
+    if (it == per_node_stats_.end()) {
+        static const std::vector<SimTime> empty_latencies;
+        return empty_latencies;
+    }
+
+    return it->second.latencies;
+}
+
 std::size_t Stats::completed_requests(NodeId node_id) const noexcept {
     const auto it = per_node_stats_.find(node_id);
     if (it == per_node_stats_.end()) {
