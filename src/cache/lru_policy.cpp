@@ -2,6 +2,18 @@
 
 namespace dm_sim {
 
+void CachePolicy::on_lookup(const Request& request,
+                            SimTime access_time,
+                            bool hit) const {
+    (void)request;
+    (void)access_time;
+    (void)hit;
+}
+
+void CachePolicy::on_epoch_start(EpochId epoch_id) const {
+    (void)epoch_id;
+}
+
 void AlwaysRemotePolicy::on_access(CacheEntry& entry, SimTime access_time) const {
     (void)entry;
     (void)access_time;
@@ -15,8 +27,10 @@ bool AlwaysRemotePolicy::should_admit(const Request& request,
 }
 
 std::optional<ObjectId> AlwaysRemotePolicy::select_victim(
-    const std::unordered_map<ObjectId, CacheEntry>& entries) const {
+    const std::unordered_map<ObjectId, CacheEntry>& entries,
+    const Request& incoming_request) const {
     (void)entries;
+    (void)incoming_request;
     return std::nullopt;
 }
 
@@ -31,7 +45,10 @@ bool LruPolicy::should_admit(const Request& request, const Response& response) c
 }
 
 std::optional<ObjectId> LruPolicy::select_victim(
-    const std::unordered_map<ObjectId, CacheEntry>& entries) const {
+    const std::unordered_map<ObjectId, CacheEntry>& entries,
+    const Request& incoming_request) const {
+    (void)incoming_request;
+
     if (entries.empty()) {
         return std::nullopt;
     }

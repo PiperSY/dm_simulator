@@ -117,6 +117,39 @@ void test_enum_strings_parse() {
            CrossNodeOverlap::High);
 }
 
+void test_phase6_policy_strings_parse() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: hotness_only\n"
+                   "  hotness:\n"
+                   "    min_admit_count: 3\n"
+                   "    reset_on_epoch_change: false");
+
+    const std::filesystem::path hotness_path =
+        write_temp_config("dm_sim_hotness_config.yaml", config);
+    const ExperimentConfig hotness_experiment =
+        dm_sim::load_experiment_config(hotness_path.string());
+
+    assert(hotness_experiment.simulation.local_cache.policy_type ==
+           LocalCachePolicyType::HotnessOnly);
+    assert(hotness_experiment.simulation.local_cache.hotness.min_admit_count == 3);
+    assert(!hotness_experiment.simulation.local_cache.hotness.reset_on_epoch_change);
+
+    config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: global_hottest_replication");
+
+    const std::filesystem::path global_path =
+        write_temp_config("dm_sim_global_replication_config.yaml", config);
+    const ExperimentConfig global_experiment =
+        dm_sim::load_experiment_config(global_path.string());
+
+    assert(global_experiment.simulation.local_cache.policy_type ==
+           LocalCachePolicyType::GlobalHottestReplication);
+}
+
 void test_missing_required_field_fails() {
     const std::filesystem::path path =
         write_temp_config("dm_sim_missing_config.yaml", R"(experiment:
@@ -155,6 +188,7 @@ void test_invalid_enum_value_fails() {
 int main() {
     test_valid_yaml_loads_experiment_and_simulation_config();
     test_enum_strings_parse();
+    test_phase6_policy_strings_parse();
     test_missing_required_field_fails();
     test_invalid_enum_value_fails();
     return 0;

@@ -46,9 +46,37 @@ LocalCachePolicyType parse_local_cache_policy(const std::string& value) {
     if (value == "lru") {
         return LocalCachePolicyType::Lru;
     }
+    if (value == "hotness_only") {
+        return LocalCachePolicyType::HotnessOnly;
+    }
+    if (value == "global_hottest_replication") {
+        return LocalCachePolicyType::GlobalHottestReplication;
+    }
 
     throw std::invalid_argument(
-        "Invalid local_cache.policy: expected always_remote or lru");
+        "Invalid local_cache.policy: expected always_remote, lru, "
+        "hotness_only, or global_hottest_replication");
+}
+
+HotnessPolicyConfig parse_hotness_policy_config(
+    const YAML::Node& local_cache_node) {
+    HotnessPolicyConfig config;
+
+    const YAML::Node hotness_node = local_cache_node["hotness"];
+    if (!hotness_node) {
+        return config;
+    }
+
+    if (const YAML::Node min_admit_count = hotness_node["min_admit_count"]) {
+        config.min_admit_count = min_admit_count.as<std::uint64_t>();
+    }
+
+    if (const YAML::Node reset_on_epoch_change =
+            hotness_node["reset_on_epoch_change"]) {
+        config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
+    }
+
+    return config;
 }
 
 // Parses the hot set mode from a string value, throwing an exception if the value is invalid.
@@ -140,6 +168,7 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         required_as<SimTime>(local_cache_node, "hit_latency", "local_cache"),
         parse_local_cache_policy(required_as<std::string>(
             local_cache_node, "policy", "local_cache")),
+        parse_hotness_policy_config(local_cache_node),
     };
 
     SyntheticWorkloadConfig workload;

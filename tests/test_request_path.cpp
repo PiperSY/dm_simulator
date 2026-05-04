@@ -17,6 +17,7 @@ using dm_sim::EventRecord;
 using dm_sim::EventType;
 using dm_sim::LocalCacheConfig;
 using dm_sim::LocalCachePolicyType;
+using dm_sim::HotnessPolicyConfig;
 using dm_sim::Request;
 using dm_sim::RequestSpec;
 using dm_sim::RequestStage;
@@ -28,6 +29,14 @@ using dm_sim::SimTime;
 using dm_sim::CrossNodeOverlap;
 using dm_sim::HotSetMode;
 using dm_sim::SyntheticWorkloadConfig;
+
+HotnessPolicyConfig hotness_config(std::uint64_t min_admit_count = 2,
+                                   bool reset_on_epoch_change = true) {
+    HotnessPolicyConfig config;
+    config.min_admit_count = min_admit_count;
+    config.reset_on_epoch_change = reset_on_epoch_change;
+    return config;
+}
 
 std::size_t count_event_type(const std::vector<EventRecord>& event_log,
                              EventType type) {
@@ -402,6 +411,146 @@ void test_synthetic_always_remote_sends_all_reads_to_memory() {
     }
 }
 
+void test_repeated_reads_under_hotness_only_hit_after_threshold() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{6001, 8, 0},
+                RequestSpec{6001, 8, 0},
+                RequestSpec{6001, 8, 0},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        8,
+        1,
+        LocalCachePolicyType::HotnessOnly,
+        hotness_config(2, true),
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 3);
+    assert(simulator.stats().local_cache_misses() == 2);
+    assert(simulator.stats().local_cache_hits() == 1);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 2);
+    assert(count_event_type(simulator.event_log(), EventType::LocalCacheHitComplete) == 1);
+    assert(simulator.responses()[0].served_from_tier == ServedFromTier::Memory);
+    assert(simulator.responses()[1].served_from_tier == ServedFromTier::Memory);
+    assert(simulator.responses()[2].served_from_tier == ServedFromTier::LocalCache);
+}
+
+void test_hotness_only_resets_across_epoch_shift() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{6101, 8, 0},
+                RequestSpec{6101, 8, 0},
+                RequestSpec{6201, 8, 1},
+                RequestSpec{6201, 8, 1},
+                RequestSpec{6201, 8, 1},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        8,
+        1,
+        LocalCachePolicyType::HotnessOnly,
+        hotness_config(2, true),
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 5);
+    assert(simulator.stats().local_cache_misses() == 4);
+    assert(simulator.stats().local_cache_hits() == 1);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 4);
+    assert(simulator.compute_node(1).local_cache().contains(6201));
+    assert(!simulator.compute_node(1).local_cache().contains(6101));
+    assert(simulator.responses().back().served_from_tier == ServedFromTier::LocalCache);
+}
+
+void test_global_hottest_replication_hits_on_first_request() {
+    SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        8,
+        1,
+        LocalCachePolicyType::GlobalHottestReplication,
+    };
+
+    SyntheticWorkloadConfig workload;
+    workload.seed = 123;
+    workload.compute_node_ids = {1, 2};
+    workload.object_count = 8;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 2;
+    workload.epoch_count = 1;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::Static;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    config.synthetic_workload = workload;
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.generated_workload().has_value());
+    const auto& epoch = simulator.generated_workload()->epochs.front();
+    const dm_sim::ObjectId hot_object =
+        epoch.hot_sets_by_node.at(1).front();
+
+    assert(simulator.stats().completed_requests() == 4);
+    assert(simulator.stats().local_cache_hits() == 4);
+    assert(simulator.stats().local_cache_misses() == 0);
+    assert(count_event_type(simulator.event_log(), EventType::ForwardToMemory) == 0);
+    assert(count_event_type(simulator.event_log(), EventType::LocalCacheHitComplete) == 4);
+
+    for (const Response& response : simulator.responses()) {
+        assert(response.served_from_tier == ServedFromTier::LocalCache);
+    }
+
+    assert(simulator.compute_node(1).local_cache().contains(hot_object));
+    assert(simulator.compute_node(2).local_cache().contains(hot_object));
+}
+
+void test_global_hottest_replication_requires_synthetic_workload() {
+    try {
+        SimulationConfig config;
+        config.compute_nodes = {
+            ComputeNodeConfig{1, {RequestSpec{1, 8, 0}}},
+        };
+        config.memory_node_id = 99;
+        config.local_cache = LocalCacheConfig{
+            8,
+            1,
+            LocalCachePolicyType::GlobalHottestReplication,
+        };
+
+        Simulator simulator(config);
+        (void)simulator;
+        assert(false);
+    } catch (const std::invalid_argument&) {
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -414,5 +563,9 @@ int main() {
     test_synthetic_workload_runs_to_completion_with_epoch_metadata();
     test_synthetic_high_overlap_lru_repeated_reads_hit_locally();
     test_synthetic_always_remote_sends_all_reads_to_memory();
+    test_repeated_reads_under_hotness_only_hit_after_threshold();
+    test_hotness_only_resets_across_epoch_shift();
+    test_global_hottest_replication_hits_on_first_request();
+    test_global_hottest_replication_requires_synthetic_workload();
     return 0;
 }

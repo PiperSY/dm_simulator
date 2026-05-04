@@ -13,6 +13,7 @@ ComputeNode::ComputeNode(NodeId node_id,
                          SimTime one_way_link_latency,
                          SimTime local_cache_hit_latency,
                          LocalCache local_cache,
+                         const GlobalReplicaPlan* global_replica_plan,
                          RequestId& next_request_id,
                          std::unordered_map<RequestId, Request>& request_table,
                          std::vector<Response>& responses,
@@ -23,6 +24,7 @@ ComputeNode::ComputeNode(NodeId node_id,
       one_way_link_latency_(one_way_link_latency),
       local_cache_hit_latency_(local_cache_hit_latency),
       local_cache_(std::move(local_cache)),
+      global_replica_plan_(global_replica_plan),
       next_request_id_(next_request_id),
       request_table_(request_table),
       responses_(responses),
@@ -58,6 +60,10 @@ std::size_t ComputeNode::issued_requests() const noexcept {
     return workload_.issued_count();
 }
 
+const LocalCache& ComputeNode::local_cache() const noexcept {
+    return local_cache_;
+}
+
 void ComputeNode::handle_generate_request(const Event& event,
                                           Scheduler& scheduler) {
     if (!workload_.has_next()) {
@@ -77,6 +83,8 @@ void ComputeNode::handle_generate_request(const Event& event,
     request.epoch_id = spec.epoch_id;
     request.current_stage = RequestStage::Generated;
 
+    start_epoch_if_needed(request.epoch_id, event.time);
+
     request_table_[request_id] = request;
     ++outstanding_requests_;
 
@@ -89,7 +97,7 @@ void ComputeNode::handle_local_cache_lookup(const Event& event,
     Request& request = request_table_.at(event.request_id);
     request.current_stage = RequestStage::LocalLookup;
 
-    if (local_cache_.lookup(request.object_id, event.time)) {
+    if (local_cache_.lookup(request, event.time)) {
         stats_.record_cache_hit(node_id_);
         scheduler.schedule(Event(event.time + local_cache_hit_latency_,
                                  EventType::LocalCacheHitComplete,
@@ -170,6 +178,27 @@ void ComputeNode::handle_request_complete(const Event& event,
         scheduler.schedule(
             Event(scheduler.now(), EventType::GenerateRequest, node_id_));
     }
+}
+
+void ComputeNode::start_epoch_if_needed(EpochId epoch_id, SimTime event_time) {
+    if (current_epoch_.has_value() && *current_epoch_ == epoch_id) {
+        return;
+    }
+
+    current_epoch_ = epoch_id;
+    local_cache_.on_epoch_start(epoch_id);
+
+    if (global_replica_plan_ == nullptr) {
+        return;
+    }
+
+    const auto it = global_replica_plan_->find(epoch_id);
+    if (it == global_replica_plan_->end()) {
+        local_cache_.install_replicas({}, event_time);
+        return;
+    }
+
+    local_cache_.install_replicas(it->second, event_time);
 }
 
 }  // namespace dm_sim
