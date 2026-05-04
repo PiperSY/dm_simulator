@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -551,6 +552,126 @@ void test_global_hottest_replication_requires_synthetic_workload() {
     }
 }
 
+void test_contention_tracks_distinct_requester_overlap() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{7001, 8, 0},
+                RequestSpec{7002, 8, 0},
+            },
+        },
+        ComputeNodeConfig{
+            2,
+            {
+                RequestSpec{7001, 8, 0},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    const std::optional<dm_sim::ObjectContentionStats> shared_object =
+        simulator.stats().object_contention(0, 7001);
+    const std::optional<dm_sim::ObjectContentionStats> private_object =
+        simulator.stats().object_contention(0, 7002);
+
+    assert(shared_object.has_value());
+    assert(private_object.has_value());
+    assert(shared_object->remote_accesses == 2);
+    assert(shared_object->distinct_requesters == 2);
+    assert(private_object->remote_accesses == 1);
+    assert(private_object->distinct_requesters == 1);
+    assert(shared_object->total_queue_wait > 0);
+}
+
+void test_contention_tracks_service_time_by_object_size() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{7101, 8, 0},
+                RequestSpec{7102, 24, 0},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    const std::optional<dm_sim::ObjectContentionStats> small_object =
+        simulator.stats().object_contention(0, 7101);
+    const std::optional<dm_sim::ObjectContentionStats> large_object =
+        simulator.stats().object_contention(0, 7102);
+
+    assert(small_object.has_value());
+    assert(large_object.has_value());
+    assert(small_object->total_remote_service_time == 6);
+    assert(large_object->total_remote_service_time == 8);
+    assert(large_object->total_remote_service_time >
+           small_object->total_remote_service_time);
+    assert(small_object->bytes_served == 8);
+    assert(large_object->bytes_served == 24);
+}
+
+void test_contention_separates_epoch_shifted_requests() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{7201, 8, 0},
+                RequestSpec{7201, 8, 1},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    const std::optional<dm_sim::ObjectContentionStats> epoch_zero =
+        simulator.stats().object_contention(0, 7201);
+    const std::optional<dm_sim::ObjectContentionStats> epoch_one =
+        simulator.stats().object_contention(1, 7201);
+
+    assert(epoch_zero.has_value());
+    assert(epoch_one.has_value());
+    assert(epoch_zero->remote_accesses == 1);
+    assert(epoch_one->remote_accesses == 1);
+    assert(simulator.stats().contention_by_epoch(0).size() == 1);
+    assert(simulator.stats().contention_by_epoch(1).size() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -567,5 +688,8 @@ int main() {
     test_hotness_only_resets_across_epoch_shift();
     test_global_hottest_replication_hits_on_first_request();
     test_global_hottest_replication_requires_synthetic_workload();
+    test_contention_tracks_distinct_requester_overlap();
+    test_contention_tracks_service_time_by_object_size();
+    test_contention_separates_epoch_shifted_requests();
     return 0;
 }

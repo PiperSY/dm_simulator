@@ -12,6 +12,8 @@ namespace dm_sim {
 
 namespace {
 
+// Escapes characters that need special handling before writing a string into
+// JSON output.
 std::string json_escape(const std::string& value) {
     std::ostringstream escaped;
     for (char character : value) {
@@ -40,6 +42,7 @@ std::string json_escape(const std::string& value) {
     return escaped.str();
 }
 
+// Converts a response source tier into the stable label used in CSV output.
 std::string served_from_tier_to_string(ServedFromTier tier) {
     switch (tier) {
     case ServedFromTier::LocalCache:
@@ -51,6 +54,37 @@ std::string served_from_tier_to_string(ServedFromTier tier) {
     throw std::invalid_argument("Unknown served-from tier");
 }
 
+// Writes one object-level contention summary as a compact JSON object.
+void write_contention_object_json(std::ofstream& output,
+                                  const ObjectContentionStats& stats) {
+    output << "{"
+           << "\"epoch_id\": " << stats.epoch_id << ", "
+           << "\"object_id\": " << stats.object_id << ", "
+           << "\"remote_accesses\": " << stats.remote_accesses << ", "
+           << "\"distinct_requesters\": " << stats.distinct_requesters << ", "
+           << "\"bytes_served\": " << stats.bytes_served << ", "
+           << "\"total_remote_service_time\": "
+           << stats.total_remote_service_time << ", "
+           << "\"total_queue_wait\": " << stats.total_queue_wait << ", "
+           << "\"average_queue_wait\": " << stats.average_queue_wait << "}";
+}
+
+// Writes a JSON array of object-level contention summaries.
+void write_contention_array_json(
+    std::ofstream& output,
+    const std::vector<ObjectContentionStats>& objects) {
+    output << "[";
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+        if (i > 0) {
+            output << ", ";
+        }
+        write_contention_object_json(output, objects[i]);
+    }
+    output << "]";
+}
+
+// Writes the main experiment summary report, including aggregate, contention,
+// and per-node metrics.
 void write_summary_json(const std::filesystem::path& path,
                         const MetricsSummary& summary) {
     std::ofstream output(path);
@@ -61,6 +95,8 @@ void write_summary_json(const std::filesystem::path& path,
 
     output << std::fixed << std::setprecision(6);
     output << "{\n";
+    // Keep the top-level sections aligned with the summary fields consumed by
+    // reports and tests.
     output << "  \"experiment_name\": \""
            << json_escape(summary.experiment_name) << "\",\n";
     output << "  \"completed_requests\": "
@@ -83,6 +119,15 @@ void write_summary_json(const std::filesystem::path& path,
     output << "    \"peak_queue_depth\": "
            << summary.memory_peak_queue_depth << "\n";
     output << "  },\n";
+    output << "  \"contention\": {\n";
+    output << "    \"top_by_queue_wait\": ";
+    write_contention_array_json(output, summary.top_by_queue_wait);
+    output << ",\n";
+    output << "    \"top_by_service_time\": ";
+    write_contention_array_json(output, summary.top_by_service_time);
+    output << "\n";
+    output << "  },\n";
+    // Per-node rows are emitted as an array so the JSON mirrors per_node.csv.
     output << "  \"per_node\": [\n";
     for (std::size_t i = 0; i < summary.per_node.size(); ++i) {
         const PerNodeMetricsSummary& node = summary.per_node[i];
@@ -104,6 +149,7 @@ void write_summary_json(const std::filesystem::path& path,
     output << "}\n";
 }
 
+// Writes a CSV report containing one metrics summary row per compute node.
 void write_per_node_csv(const std::filesystem::path& path,
                         const MetricsSummary& summary) {
     std::ofstream output(path);
@@ -126,6 +172,7 @@ void write_per_node_csv(const std::filesystem::path& path,
     }
 }
 
+// Writes one CSV row per completed response, joined with request metadata.
 void write_latencies_csv(const std::filesystem::path& path,
                          const Simulator& simulator) {
     std::ofstream output(path);
@@ -149,8 +196,40 @@ void write_latencies_csv(const std::filesystem::path& path,
     }
 }
 
+// Writes all recorded object-contention metrics as a CSV report.
+void write_contention_by_object_csv(const std::filesystem::path& path,
+                                    const Simulator& simulator) {
+    std::ofstream output(path);
+    if (!output) {
+        throw std::runtime_error("Failed to open contention output: " +
+                                 path.string());
+    }
+
+    output << "epoch_id,object_id,remote_accesses,distinct_requesters,"
+              "bytes_served,total_remote_service_time,total_queue_wait,"
+              "max_queue_wait,queue_wait_samples,max_observed_queue_depth,"
+              "average_queue_wait\n";
+    output << std::fixed << std::setprecision(6);
+    for (const ObjectContentionStats& stats :
+         simulator.stats().all_contention_stats()) {
+        output << stats.epoch_id << ","
+               << stats.object_id << ","
+               << stats.remote_accesses << ","
+               << stats.distinct_requesters << ","
+               << stats.bytes_served << ","
+               << stats.total_remote_service_time << ","
+               << stats.total_queue_wait << ","
+               << stats.max_queue_wait << ","
+               << stats.queue_wait_samples << ","
+               << stats.max_observed_queue_depth << ","
+               << stats.average_queue_wait << "\n";
+    }
+}
+
 }  // namespace
 
+// Builds a report-friendly metrics summary from the simulator's recorded
+// statistics.
 MetricsSummary summarize_metrics(const std::string& experiment_name,
                                  const Simulator& simulator) {
     const Stats& stats = simulator.stats();
@@ -159,7 +238,7 @@ MetricsSummary summarize_metrics(const std::string& experiment_name,
     summary.experiment_name = experiment_name;
     summary.completed_requests = stats.completed_requests();
     summary.mean_latency = stats.average_latency();
-    summary.median_latency = dm_sim::median_latency(stats.latencies());
+    summary.median_latency = median_latency(stats.latencies());
     summary.p95_latency = dm_sim::p95_latency(stats.latencies());
     summary.p99_latency = dm_sim::p99_latency(stats.latencies());
     summary.local_cache_hits = stats.local_cache_hits();
@@ -168,7 +247,14 @@ MetricsSummary summarize_metrics(const std::string& experiment_name,
     summary.memory_average_wait = stats.average_memory_wait();
     summary.memory_max_wait = stats.max_memory_wait();
     summary.memory_peak_queue_depth = stats.peak_memory_queue_depth();
+    // Keep the most contended objects by the two metrics surfaced in the JSON
+    // summary.
+    summary.top_by_queue_wait =
+        stats.top_contention_objects(ContentionSortKey::TotalQueueWait, 5);
+    summary.top_by_service_time =
+        stats.top_contention_objects(ContentionSortKey::TotalRemoteServiceTime, 5);
 
+    // Preserve the compute-node order from the experiment configuration.
     for (const ComputeNodeConfig& node_config : simulator.config().compute_nodes) {
         summary.per_node.push_back(PerNodeMetricsSummary{
             node_config.node_id,
@@ -184,10 +270,13 @@ MetricsSummary summarize_metrics(const std::string& experiment_name,
     return summary;
 }
 
+// Loads an experiment configuration, runs the simulator, writes report files,
+// and returns the full experiment result.
 ExperimentResult ExperimentRunner::run_config(
     const std::string& config_path,
     const std::optional<std::string>& output_dir_override) const {
     ExperimentConfig config = load_experiment_config(config_path);
+    // Allow callers to redirect output without changing the experiment config.
     const std::string output_dir =
         output_dir_override.has_value() ? *output_dir_override : config.output_dir;
 
@@ -196,11 +285,14 @@ ExperimentResult ExperimentRunner::run_config(
 
     MetricsSummary summary = summarize_metrics(config.name, simulator);
 
+    // Create the output directory before writing all generated report files.
     const std::filesystem::path output_path(output_dir);
     std::filesystem::create_directories(output_path);
     write_summary_json(output_path / "summary.json", summary);
     write_per_node_csv(output_path / "per_node.csv", summary);
     write_latencies_csv(output_path / "latencies.csv", simulator);
+    write_contention_by_object_csv(output_path / "contention_by_object.csv",
+                                   simulator);
 
     return ExperimentResult{config, summary, output_dir};
 }

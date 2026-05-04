@@ -37,6 +37,7 @@ void MemoryNode::handle_forward_to_memory(const Event& event,
     request.memory_enqueue_time = event.time;
     queued_requests_.push_back(event.request_id);
     stats_.observe_memory_queue_depth(queued_requests_.size());
+    stats_.record_remote_access(request, queued_requests_.size());
 
     if (!service_in_progress_ && !service_start_scheduled_) {
         service_start_scheduled_ = true;
@@ -65,6 +66,7 @@ void MemoryNode::handle_memory_service_start(const Event& event,
 
     const SimTime wait_time = event.time - request.memory_enqueue_time;
     stats_.record_memory_wait(wait_time);
+    stats_.record_object_queue_wait(request, wait_time);
 
     scheduler.schedule(Event(event.time + service_time_for(request),
                              EventType::MemoryServiceComplete,
@@ -81,6 +83,8 @@ void MemoryNode::handle_memory_service_complete(const Event& event,
     service_in_progress_ = false;
 
     const Request& request = request_table_.at(event.request_id);
+    stats_.record_object_service(request, service_time_for(request));
+
     scheduler.schedule(Event(event.time + config_.one_way_link_latency,
                              EventType::ReturnResponse,
                              request.source_node_id,
