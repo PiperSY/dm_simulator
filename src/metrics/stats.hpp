@@ -11,20 +11,25 @@
 
 namespace dm_sim {
 
+/***********************************
+ * ObjectContentionStats struct captures various metrics related to contention for a specific object during a particular epoch, including remote accesses, distinct requesters, 
+ *   bytes served, service times, and queue wait times. This structure is used to analyze and understand contention patterns in the simulation.
+ **********************************/
 struct ObjectContentionStats {
     EpochId epoch_id = 0;
     ObjectId object_id = 0;
-    std::size_t remote_accesses = 0;
-    std::size_t distinct_requesters = 0;
-    std::uint64_t bytes_served = 0;
-    SimTime total_remote_service_time = 0;
+    std::size_t remote_accesses = 0;            // Total number of remote accesses for this object during the epoch.
+    std::size_t distinct_requesters = 0;        // Number of unique compute nodes that requested this object, indicating the breadth of contention across the system.
+    std::uint64_t bytes_served = 0;             // Total bytes served for this object during the epoch, providing insight into the volume of data involved in the contention.   
+    SimTime total_remote_service_time = 0;      // Total time spent servicing remote requests for this object, which can indicate the severity of contention and its impact on latency.
     SimTime total_queue_wait = 0;
     SimTime max_queue_wait = 0;
-    std::size_t queue_wait_samples = 0;
-    std::size_t max_observed_queue_depth = 0;
+    std::size_t queue_wait_samples = 0;         // Number of samples taken for queue wait times, used to calculate average queue wait time for this object during the epoch.
+    std::size_t max_observed_queue_depth = 0;   // Maximum observed depth of the memory request queue for this object during the epoch, which can indicate periods of high contention and potential bottlenecks.
     double average_queue_wait = 0.0;
 };
 
+// Sorting key for top contention objects, allowing for different criteria to be used when ranking objects based on their contention statistics.
 enum class ContentionSortKey {
     TotalQueueWait,
     TotalRemoteServiceTime,
