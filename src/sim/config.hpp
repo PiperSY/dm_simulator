@@ -20,10 +20,27 @@ enum class LocalCachePolicyType {
     Lru,
     HotnessOnly,
     GlobalHottestReplication,
+    ContentionAware,
 };
 
 struct HotnessPolicyConfig {
     std::uint64_t min_admit_count = 2;
+    bool reset_on_epoch_change = true;
+};
+
+struct ContentionPolicyWeights {
+    double local_hotness_weight = 1.0;
+    double remote_access_weight = 1.0;
+    double distinct_requester_weight = 1.5;
+    double queue_wait_weight = 2.0;
+    double remote_service_time_weight = 1.0;
+    double size_penalty_weight = 0.5;
+};
+
+struct ContentionPolicyConfig {
+    ContentionPolicyWeights weights;
+    double min_admit_score = 1.0;
+    std::uint64_t local_hotness_threshold = 2;
     bool reset_on_epoch_change = true;
 };
 
@@ -38,6 +55,7 @@ struct LocalCacheConfig {
     SimTime hit_latency = 1;
     LocalCachePolicyType policy_type = LocalCachePolicyType::AlwaysRemote;
     HotnessPolicyConfig hotness;
+    ContentionPolicyConfig contention;
 };
 
 /*********************************** 

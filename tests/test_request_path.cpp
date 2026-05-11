@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -14,6 +15,7 @@
 namespace {
 
 using dm_sim::ComputeNodeConfig;
+using dm_sim::ContentionPolicyConfig;
 using dm_sim::EventRecord;
 using dm_sim::EventType;
 using dm_sim::LocalCacheConfig;
@@ -36,6 +38,19 @@ HotnessPolicyConfig hotness_config(std::uint64_t min_admit_count = 2,
     HotnessPolicyConfig config;
     config.min_admit_count = min_admit_count;
     config.reset_on_epoch_change = reset_on_epoch_change;
+    return config;
+}
+
+ContentionPolicyConfig contention_config(double min_admit_score = 1.0) {
+    ContentionPolicyConfig config;
+    config.weights.local_hotness_weight = 0.0;
+    config.weights.remote_access_weight = 1.0;
+    config.weights.distinct_requester_weight = 1.0;
+    config.weights.queue_wait_weight = 1.0;
+    config.weights.remote_service_time_weight = 1.0;
+    config.weights.size_penalty_weight = 0.0;
+    config.min_admit_score = min_admit_score;
+    config.local_hotness_threshold = 2;
     return config;
 }
 
@@ -672,6 +687,164 @@ void test_contention_separates_epoch_shifted_requests() {
     assert(simulator.stats().contention_by_epoch(1).size() == 1);
 }
 
+void test_global_epoch_barrier_waits_for_prior_epoch_completion() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{8001, 8, 0},
+                RequestSpec{8002, 8, 1},
+            },
+        },
+        ComputeNodeConfig{
+            2,
+            {
+                RequestSpec{8003, 8, 0},
+                RequestSpec{8004, 8, 1},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    SimTime latest_epoch_zero_complete = 0;
+    std::optional<SimTime> first_epoch_one_lookup;
+    for (const EventRecord& event : simulator.event_log()) {
+        if (event.request_id == dm_sim::kInvalidRequestId) {
+            continue;
+        }
+
+        const Request& request = simulator.requests().at(event.request_id);
+        if (request.epoch_id == 0 && event.type == EventType::RequestComplete) {
+            latest_epoch_zero_complete =
+                std::max(latest_epoch_zero_complete, event.time);
+        }
+
+        if (request.epoch_id == 1 && event.type == EventType::LocalCacheLookup) {
+            if (!first_epoch_one_lookup.has_value() ||
+                event.time < *first_epoch_one_lookup) {
+                first_epoch_one_lookup = event.time;
+            }
+        }
+    }
+
+    assert(first_epoch_one_lookup.has_value());
+    assert(*first_epoch_one_lookup >= latest_epoch_zero_complete);
+}
+
+void test_contention_aware_uses_previous_epoch_and_hits_after_admission() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{8101, 8, 0},
+                RequestSpec{8101, 8, 1},
+                RequestSpec{8101, 8, 1},
+            },
+        },
+        ComputeNodeConfig{
+            2,
+            {
+                RequestSpec{8101, 8, 0},
+                RequestSpec{8101, 8, 1},
+                RequestSpec{8101, 8, 1},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        8,
+        1,
+        LocalCachePolicyType::ContentionAware,
+        HotnessPolicyConfig{},
+        contention_config(1.0),
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 6);
+    assert(simulator.stats().local_cache_hits() == 2);
+    assert(simulator.stats().local_cache_misses() == 4);
+
+    const std::optional<dm_sim::ObjectContentionStats> epoch_zero =
+        simulator.stats().object_contention(0, 8101);
+    const std::optional<dm_sim::ObjectContentionStats> epoch_one =
+        simulator.stats().object_contention(1, 8101);
+    assert(epoch_zero.has_value());
+    assert(epoch_one.has_value());
+    assert(epoch_zero->remote_accesses == 2);
+    assert(epoch_one->remote_accesses == 2);
+
+    std::size_t admitted_epoch_one = 0;
+    for (const dm_sim::PolicyDecisionRecord& decision :
+         simulator.policy_diagnostics()) {
+        if (decision.epoch_id == 1 && decision.admitted) {
+            ++admitted_epoch_one;
+            assert(decision.score.remote_accesses > 0.0);
+        }
+    }
+    assert(admitted_epoch_one == 2);
+}
+
+void test_contention_aware_does_not_use_current_epoch_telemetry() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{
+            1,
+            {
+                RequestSpec{8201, 8, 0},
+                RequestSpec{8202, 8, 1},
+                RequestSpec{8202, 8, 1},
+            },
+        },
+        ComputeNodeConfig{
+            2,
+            {
+                RequestSpec{8201, 8, 0},
+                RequestSpec{8202, 8, 1},
+                RequestSpec{8202, 8, 1},
+            },
+        },
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        8,
+        1,
+        LocalCachePolicyType::ContentionAware,
+        HotnessPolicyConfig{},
+        contention_config(1.0),
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().local_cache_hits() == 0);
+    assert(simulator.stats().local_cache_misses() == 6);
+    const std::optional<dm_sim::ObjectContentionStats> new_epoch_one_object =
+        simulator.stats().object_contention(1, 8202);
+    assert(new_epoch_one_object.has_value());
+    assert(new_epoch_one_object->remote_accesses == 4);
+}
+
 }  // namespace
 
 int main() {
@@ -691,5 +864,8 @@ int main() {
     test_contention_tracks_distinct_requester_overlap();
     test_contention_tracks_service_time_by_object_size();
     test_contention_separates_epoch_shifted_requests();
+    test_global_epoch_barrier_waits_for_prior_epoch_completion();
+    test_contention_aware_uses_previous_epoch_and_hits_after_admission();
+    test_contention_aware_does_not_use_current_epoch_telemetry();
     return 0;
 }

@@ -1,5 +1,6 @@
 #include "sim/config_loader.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -52,10 +53,13 @@ LocalCachePolicyType parse_local_cache_policy(const std::string& value) {
     if (value == "global_hottest_replication") {
         return LocalCachePolicyType::GlobalHottestReplication;
     }
+    if (value == "contention_aware") {
+        return LocalCachePolicyType::ContentionAware;
+    }
 
     throw std::invalid_argument(
         "Invalid local_cache.policy: expected always_remote, lru, "
-        "hotness_only, or global_hottest_replication");
+        "hotness_only, global_hottest_replication, or contention_aware");
 }
 
 HotnessPolicyConfig parse_hotness_policy_config(
@@ -73,6 +77,87 @@ HotnessPolicyConfig parse_hotness_policy_config(
 
     if (const YAML::Node reset_on_epoch_change =
             hotness_node["reset_on_epoch_change"]) {
+        config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
+    }
+
+    return config;
+}
+
+double optional_nonnegative_double(const YAML::Node& node,
+                                   const std::string& key,
+                                   const std::string& context,
+                                   double current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const double value = child.as<double>();
+    if (!std::isfinite(value) || value < 0.0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a nonnegative finite number");
+    }
+
+    return value;
+}
+
+ContentionPolicyConfig parse_contention_policy_config(
+    const YAML::Node& local_cache_node) {
+    ContentionPolicyConfig config;
+
+    const YAML::Node contention_node = local_cache_node["contention"];
+    if (!contention_node) {
+        return config;
+    }
+
+    config.weights.local_hotness_weight = optional_nonnegative_double(
+        contention_node,
+        "local_hotness_weight",
+        "local_cache.contention",
+        config.weights.local_hotness_weight);
+    config.weights.remote_access_weight = optional_nonnegative_double(
+        contention_node,
+        "remote_access_weight",
+        "local_cache.contention",
+        config.weights.remote_access_weight);
+    config.weights.distinct_requester_weight = optional_nonnegative_double(
+        contention_node,
+        "distinct_requester_weight",
+        "local_cache.contention",
+        config.weights.distinct_requester_weight);
+    config.weights.queue_wait_weight = optional_nonnegative_double(
+        contention_node,
+        "queue_wait_weight",
+        "local_cache.contention",
+        config.weights.queue_wait_weight);
+    config.weights.remote_service_time_weight = optional_nonnegative_double(
+        contention_node,
+        "remote_service_time_weight",
+        "local_cache.contention",
+        config.weights.remote_service_time_weight);
+    config.weights.size_penalty_weight = optional_nonnegative_double(
+        contention_node,
+        "size_penalty_weight",
+        "local_cache.contention",
+        config.weights.size_penalty_weight);
+    config.min_admit_score = optional_nonnegative_double(
+        contention_node,
+        "min_admit_score",
+        "local_cache.contention",
+        config.min_admit_score);
+
+    if (const YAML::Node threshold =
+            contention_node["local_hotness_threshold"]) {
+        config.local_hotness_threshold = threshold.as<std::uint64_t>();
+        if (config.local_hotness_threshold == 0) {
+            throw std::invalid_argument(
+                "Invalid local_cache.contention.local_hotness_threshold: "
+                "expected a positive integer");
+        }
+    }
+
+    if (const YAML::Node reset_on_epoch_change =
+            contention_node["reset_on_epoch_change"]) {
         config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
     }
 
@@ -169,6 +254,7 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         parse_local_cache_policy(required_as<std::string>(
             local_cache_node, "policy", "local_cache")),
         parse_hotness_policy_config(local_cache_node),
+        parse_contention_policy_config(local_cache_node),
     };
 
     SyntheticWorkloadConfig workload;

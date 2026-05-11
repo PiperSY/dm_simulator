@@ -62,6 +62,7 @@ public:
     [[nodiscard]] std::size_t miss_count() const noexcept;
     [[nodiscard]] std::uint64_t bytes_admitted() const noexcept;
     [[nodiscard]] std::uint64_t bytes_evicted() const noexcept;
+    [[nodiscard]] std::vector<PolicyDecisionRecord> policy_diagnostics() const;
 
 private:
     // Evict the specified object from the cache, updating occupancy and eviction statistics accordingly.

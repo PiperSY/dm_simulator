@@ -53,10 +53,14 @@ public:
     // Returns a constant reference to the generated workload, if one was generated as part of the simulation configuration.
     [[nodiscard]] const std::optional<GeneratedWorkload>& generated_workload()
         const noexcept;
+    [[nodiscard]] std::vector<PolicyDecisionRecord> policy_diagnostics() const;
 
 private:
     // Dispatches the given event to the appropriate node (compute or memory) based on the event's target ID.
     void dispatch_event(const Event& event, Scheduler& scheduler);
+    void release_next_epoch_if_ready(Scheduler& scheduler);
+    [[nodiscard]] bool all_compute_nodes_idle() const noexcept;
+    [[nodiscard]] std::optional<EpochId> next_unreleased_epoch() const;
     // Validates the simulation configuration to ensure it meets necessary constraints and requirements before running the simulation.
     void validate_config() const;
 
@@ -71,6 +75,7 @@ private:
     std::unordered_map<NodeId, std::unique_ptr<ComputeNode>> compute_nodes_;
     MemoryNode memory_node_;
     std::vector<EventRecord> event_log_;
+    std::optional<EpochId> released_epoch_;
 };
 
 }  // namespace dm_sim

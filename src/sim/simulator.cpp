@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cache/cache_policy.hpp"
+#include "cache/contention_policy.hpp"
 #include "cache/hotness_policy.hpp"
 #include "cache/local_cache.hpp"
 #include "cache/lru_policy.hpp"
@@ -20,7 +21,8 @@ namespace {
 
 // Factory function to create cache policy instances based on the specified policy type.
 std::unique_ptr<CachePolicy> make_cache_policy(
-    const LocalCacheConfig& local_cache_config) {
+    const LocalCacheConfig& local_cache_config,
+    const Stats& stats) {
     switch (local_cache_config.policy_type) {
     case LocalCachePolicyType::AlwaysRemote:
         return std::make_unique<AlwaysRemotePolicy>();
@@ -30,6 +32,11 @@ std::unique_ptr<CachePolicy> make_cache_policy(
         return std::make_unique<HotnessOnlyPolicy>(local_cache_config.hotness);
     case LocalCachePolicyType::GlobalHottestReplication:
         return std::make_unique<GlobalHottestReplicationPolicy>();
+    case LocalCachePolicyType::ContentionAware:
+        return std::make_unique<ContentionAwarePolicy>(
+            local_cache_config.contention,
+            local_cache_config.capacity_bytes,
+            stats);
     }
 
     throw std::invalid_argument("Unknown local cache policy type");
@@ -152,7 +159,8 @@ Simulator::Simulator(SimulationConfig config)
                                           config_.local_cache.hit_latency,
                                           LocalCache(
                                               config_.local_cache.capacity_bytes,
-                                              make_cache_policy(config_.local_cache)),
+                                              make_cache_policy(config_.local_cache,
+                                                                stats_)),
                                           replica_plan,
                                           next_request_id_,
                                           request_table_,
@@ -162,14 +170,11 @@ Simulator::Simulator(SimulationConfig config)
 }
 
 void Simulator::run() {
-    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
-        if (!node_config.requests.empty()) {
-            scheduler_.schedule(Event(0, EventType::GenerateRequest, node_config.node_id));
-        }
-    }
+    release_next_epoch_if_ready(scheduler_);
 
     scheduler_.run_until_empty([this](const Event& event, Scheduler& scheduler) {
         dispatch_event(event, scheduler);
+        release_next_epoch_if_ready(scheduler);
     });
 }
 
@@ -211,6 +216,39 @@ const std::optional<GeneratedWorkload>& Simulator::generated_workload()
     return generated_workload_;
 }
 
+std::vector<PolicyDecisionRecord> Simulator::policy_diagnostics() const {
+    std::vector<PolicyDecisionRecord> diagnostics;
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        const auto compute_it = compute_nodes_.find(node_config.node_id);
+        if (compute_it == compute_nodes_.end()) {
+            continue;
+        }
+
+        std::vector<PolicyDecisionRecord> node_diagnostics =
+            compute_it->second->policy_diagnostics();
+        diagnostics.insert(diagnostics.end(),
+                           node_diagnostics.begin(),
+                           node_diagnostics.end());
+    }
+
+    std::sort(diagnostics.begin(),
+              diagnostics.end(),
+              [](const PolicyDecisionRecord& lhs,
+                 const PolicyDecisionRecord& rhs) {
+                  if (lhs.epoch_id != rhs.epoch_id) {
+                      return lhs.epoch_id < rhs.epoch_id;
+                  }
+                  if (lhs.request_id != rhs.request_id) {
+                      return lhs.request_id < rhs.request_id;
+                  }
+                  if (lhs.node_id != rhs.node_id) {
+                      return lhs.node_id < rhs.node_id;
+                  }
+                  return lhs.object_id < rhs.object_id;
+              });
+    return diagnostics;
+}
+
 void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
     event_log_.push_back(
         EventRecord{event.time, event.type, event.target_id, event.request_id});
@@ -227,6 +265,64 @@ void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
     }
 
     throw std::logic_error("Unknown target_id in simulator dispatch");
+}
+
+void Simulator::release_next_epoch_if_ready(Scheduler& scheduler) {
+    if (!scheduler.empty() || !all_compute_nodes_idle()) {
+        return;
+    }
+
+    const std::optional<EpochId> next_epoch = next_unreleased_epoch();
+    if (!next_epoch.has_value()) {
+        return;
+    }
+
+    released_epoch_ = *next_epoch;
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        const auto compute_it = compute_nodes_.find(node_config.node_id);
+        if (compute_it == compute_nodes_.end()) {
+            continue;
+        }
+
+        const std::optional<EpochId> node_next_epoch =
+            compute_it->second->next_request_epoch();
+        if (node_next_epoch.has_value() && *node_next_epoch == *next_epoch) {
+            scheduler.schedule(Event(scheduler.now(),
+                                     EventType::GenerateRequest,
+                                     node_config.node_id));
+        }
+    }
+}
+
+bool Simulator::all_compute_nodes_idle() const noexcept {
+    for (const auto& entry : compute_nodes_) {
+        if (entry.second->outstanding_requests() != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::optional<EpochId> Simulator::next_unreleased_epoch() const {
+    std::optional<EpochId> next_epoch;
+    for (const auto& entry : compute_nodes_) {
+        const std::optional<EpochId> node_epoch =
+            entry.second->next_request_epoch();
+        if (!node_epoch.has_value()) {
+            continue;
+        }
+
+        if (released_epoch_.has_value() && *node_epoch <= *released_epoch_) {
+            continue;
+        }
+
+        if (!next_epoch.has_value() || *node_epoch < *next_epoch) {
+            next_epoch = *node_epoch;
+        }
+    }
+
+    return next_epoch;
 }
 
 void Simulator::validate_config() const {
@@ -248,6 +344,14 @@ void Simulator::validate_config() const {
         const auto [_, inserted] = seen_compute_node_ids.insert(node_config.node_id);
         if (!inserted) {
             throw std::invalid_argument("Compute node IDs must be unique");
+        }
+
+        for (std::size_t i = 1; i < node_config.requests.size(); ++i) {
+            if (node_config.requests[i].epoch_id <
+                node_config.requests[i - 1].epoch_id) {
+                throw std::invalid_argument(
+                    "Compute node request streams must be sorted by epoch_id");
+            }
         }
     }
 }

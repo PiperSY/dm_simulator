@@ -83,6 +83,8 @@ public:
 
     // Returns the next request and advances the cursor.
     RequestSpec next();
+    // Returns the next request without advancing the cursor.
+    [[nodiscard]] const RequestSpec& peek_next() const;
 
 private:
     std::vector<RequestSpec> requests_;

@@ -24,6 +24,7 @@ add_library(dm_sim_core
     src/cache/local_cache.cpp
     src/cache/lru_policy.cpp
     src/cache/hotness_policy.cpp
+    src/cache/contention_policy.cpp
     src/nodes/compute_node.cpp
     src/nodes/memory_node.cpp
     src/metrics/stats.cpp

@@ -14,6 +14,25 @@ void CachePolicy::on_epoch_start(EpochId epoch_id) const {
     (void)epoch_id;
 }
 
+void CachePolicy::on_admission_result(
+    const Request& request,
+    const Response& response,
+    SimTime access_time,
+    bool admitted,
+    const std::string& reason,
+    const std::vector<ObjectId>& evicted_objects) const {
+    (void)request;
+    (void)response;
+    (void)access_time;
+    (void)admitted;
+    (void)reason;
+    (void)evicted_objects;
+}
+
+std::vector<PolicyDecisionRecord> CachePolicy::diagnostics() const {
+    return {};
+}
+
 void AlwaysRemotePolicy::on_access(CacheEntry& entry, SimTime access_time) const {
     (void)entry;
     (void)access_time;
