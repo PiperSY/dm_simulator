@@ -13,6 +13,7 @@ using dm_sim::CrossNodeOverlap;
 using dm_sim::ExperimentConfig;
 using dm_sim::HotSetMode;
 using dm_sim::LocalCachePolicyType;
+using dm_sim::ObjectSizeMode;
 using dm_sim::SimulationConfig;
 
 std::filesystem::path write_temp_config(const std::string& name,
@@ -80,6 +81,8 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     assert((workload.compute_node_ids == std::vector<dm_sim::NodeId>{1, 2}));
     assert(workload.object_count == 32);
     assert(workload.object_size_bytes == 16);
+    assert(workload.hot_set_churn_fraction == 1.0);
+    assert(workload.object_size_mode == ObjectSizeMode::Fixed);
     assert(workload.requests_per_node_per_epoch == 4);
     assert(workload.epoch_count == 2);
     assert(workload.hot_set_size == 4);
@@ -90,6 +93,30 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     const SimulationConfig loaded_simulation =
         dm_sim::load_simulation_config(path.string());
     assert(loaded_simulation.memory_node_id == 99);
+}
+
+void test_phase_b_workload_fields_parse() {
+    std::string config = valid_config_text();
+    config.replace(config.find("object_size_bytes: 16"),
+                   std::string("object_size_bytes: 16").size(),
+                   "object_size_bytes: 16\n"
+                   "  hot_set_churn_fraction: 0.5\n"
+                   "  object_size_mode: bimodal\n"
+                   "  object_size_small_bytes: 8\n"
+                   "  object_size_large_bytes: 64\n"
+                   "  large_object_probability: 0.25");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_phase_b_config.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+
+    const auto& workload = *experiment.simulation.synthetic_workload;
+    assert(workload.hot_set_churn_fraction == 0.5);
+    assert(workload.object_size_mode == ObjectSizeMode::Bimodal);
+    assert(workload.object_size_small_bytes == 8);
+    assert(workload.object_size_large_bytes == 64);
+    assert(workload.large_object_probability == 0.25);
 }
 
 void test_enum_strings_parse() {
@@ -150,6 +177,139 @@ void test_phase6_policy_strings_parse() {
            LocalCachePolicyType::GlobalHottestReplication);
 }
 
+void test_phase8_contention_policy_config_parses() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: contention_aware\n"
+                   "  contention:\n"
+                   "    local_hotness_weight: 1.2\n"
+                   "    remote_access_weight: 1.3\n"
+                   "    distinct_requester_weight: 1.4\n"
+                   "    queue_wait_weight: 2.5\n"
+                   "    remote_service_time_weight: 1.6\n"
+                   "    size_penalty_weight: 0.7\n"
+                   "    min_admit_score: 1.8\n"
+                   "    local_hotness_threshold: 3\n"
+                   "    reset_on_epoch_change: false");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_contention_config.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+
+    const auto& local_cache = experiment.simulation.local_cache;
+    assert(local_cache.policy_type == LocalCachePolicyType::ContentionAware);
+    assert(local_cache.contention.weights.local_hotness_weight == 1.2);
+    assert(local_cache.contention.weights.remote_access_weight == 1.3);
+    assert(local_cache.contention.weights.distinct_requester_weight == 1.4);
+    assert(local_cache.contention.weights.queue_wait_weight == 2.5);
+    assert(local_cache.contention.weights.remote_service_time_weight == 1.6);
+    assert(local_cache.contention.weights.size_penalty_weight == 0.7);
+    assert(local_cache.contention.min_admit_score == 1.8);
+    assert(local_cache.contention.local_hotness_threshold == 3);
+    assert(!local_cache.contention.reset_on_epoch_change);
+}
+
+void test_invalid_contention_policy_config_fails() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: contention_aware\n"
+                   "  contention:\n"
+                   "    queue_wait_weight: -1.0");
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_invalid_contention_config.yaml", config);
+
+    try {
+        (void)dm_sim::load_experiment_config(path.string());
+        assert(false);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        assert(message.find("local_cache.contention.queue_wait_weight") !=
+               std::string::npos);
+    }
+}
+
+void test_invalid_phase_b_workload_fields_fail() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  hot_set_churn_fraction: 1.5");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_churn_config.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.hot_set_churn_fraction") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  object_size_mode: triangular");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_size_mode_config.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.object_size_mode") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  object_size_mode: bimodal\n"
+                       "  object_size_small_bytes: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_size_config.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.object_size_small_bytes") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  large_object_probability: -0.25");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_large_probability.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.large_object_probability") !=
+                   std::string::npos);
+        }
+    }
+}
+
 void test_missing_required_field_fails() {
     const std::filesystem::path path =
         write_temp_config("dm_sim_missing_config.yaml", R"(experiment:
@@ -187,8 +347,12 @@ void test_invalid_enum_value_fails() {
 
 int main() {
     test_valid_yaml_loads_experiment_and_simulation_config();
+    test_phase_b_workload_fields_parse();
     test_enum_strings_parse();
     test_phase6_policy_strings_parse();
+    test_phase8_contention_policy_config_parses();
+    test_invalid_contention_policy_config_fails();
+    test_invalid_phase_b_workload_fields_fail();
     test_missing_required_field_fails();
     test_invalid_enum_value_fails();
     return 0;

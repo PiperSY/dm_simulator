@@ -38,6 +38,9 @@ struct MetricsSummary {
     std::size_t memory_peak_queue_depth = 0;
     std::vector<ObjectContentionStats> top_by_queue_wait;
     std::vector<ObjectContentionStats> top_by_service_time;
+    std::size_t policy_admitted = 0;
+    std::size_t policy_rejected = 0;
+    std::vector<PolicyDecisionRecord> top_policy_decisions;
     std::vector<PerNodeMetricsSummary> per_node;
 };
 

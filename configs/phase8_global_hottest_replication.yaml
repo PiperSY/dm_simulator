@@ -1,0 +1,28 @@
+experiment:
+  name: phase8_global_hottest_replication
+  output_dir: results/phase8_global_hottest_replication
+
+memory:
+  node_id: 99
+  base_latency: 25
+  bandwidth_bytes_per_time: 16
+
+link:
+  one_way_latency: 6
+
+local_cache:
+  capacity_bytes: 256
+  hit_latency: 1
+  policy: global_hottest_replication
+
+workload:
+  seed: 8888
+  compute_node_ids: [1, 2, 3, 4]
+  object_count: 128
+  object_size_bytes: 64
+  requests_per_node_per_epoch: 16
+  epoch_count: 3
+  hot_set_size: 8
+  hot_access_probability: 0.8
+  hot_set_mode: epoch_shift
+  cross_node_overlap: medium

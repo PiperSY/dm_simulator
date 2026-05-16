@@ -1,7 +1,9 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "cache/cache_entry.hpp"
 #include "model/epoch.hpp"
@@ -9,6 +11,27 @@
 #include "model/response.hpp"
 
 namespace dm_sim {
+
+struct ContentionScoreComponents {
+    double local_hotness = 0.0;
+    double remote_accesses = 0.0;
+    double distinct_requesters = 0.0;
+    double queue_wait = 0.0;
+    double remote_service_time = 0.0;
+    double size_penalty = 0.0;
+    double total_score = 0.0;
+};
+
+struct PolicyDecisionRecord {
+    NodeId node_id = 0;
+    EpochId epoch_id = 0;
+    RequestId request_id = kInvalidRequestId;
+    ObjectId object_id = 0;
+    bool admitted = false;
+    std::string reason;
+    ContentionScoreComponents score;
+    std::vector<ObjectId> evicted_objects;
+};
 
 // Base class for cache policies
 class CachePolicy {
@@ -31,6 +54,14 @@ public:
     [[nodiscard]] virtual std::optional<ObjectId> select_victim(
         const std::unordered_map<ObjectId, CacheEntry>& entries,
         const Request& incoming_request) const = 0;
+    virtual void on_admission_result(
+        const Request& request,
+        const Response& response,
+        SimTime access_time,
+        bool admitted,
+        const std::string& reason,
+        const std::vector<ObjectId>& evicted_objects) const;
+    [[nodiscard]] virtual std::vector<PolicyDecisionRecord> diagnostics() const;
 };
 
 // A simple cache policy that never admits any entries into the cache and always evicts the least recently accessed entry

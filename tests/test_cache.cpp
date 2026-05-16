@@ -1,10 +1,15 @@
 #include <cassert>
+#include <cmath>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 
 #include "cache/cache_policy.hpp"
+#include "cache/contention_policy.hpp"
 #include "cache/hotness_policy.hpp"
 #include "cache/local_cache.hpp"
 #include "cache/lru_policy.hpp"
+#include "metrics/stats.hpp"
 #include "model/request.hpp"
 #include "model/response.hpp"
 
@@ -12,24 +17,32 @@ namespace {
 
 using dm_sim::AlwaysRemotePolicy;
 using dm_sim::CacheReplica;
+using dm_sim::CacheEntry;
+using dm_sim::ContentionAwarePolicy;
+using dm_sim::ContentionPolicyConfig;
 using dm_sim::GlobalHottestReplicationPolicy;
 using dm_sim::HotnessOnlyPolicy;
 using dm_sim::HotnessPolicyConfig;
 using dm_sim::LocalCache;
 using dm_sim::LruPolicy;
 using dm_sim::ObjectId;
+using dm_sim::PolicyDecisionRecord;
 using dm_sim::Request;
 using dm_sim::Response;
 using dm_sim::ServedFromTier;
+using dm_sim::Stats;
 
 Request make_request(dm_sim::RequestId request_id,
                      ObjectId object_id,
-                     std::uint64_t size_bytes) {
+                     std::uint64_t size_bytes,
+                     dm_sim::EpochId epoch_id = 0,
+                     dm_sim::NodeId source_node_id = 1) {
     Request request;
     request.request_id = request_id;
-    request.source_node_id = 1;
+    request.source_node_id = source_node_id;
     request.object_id = object_id;
     request.size_bytes = size_bytes;
+    request.epoch_id = epoch_id;
     return request;
 }
 
@@ -47,6 +60,41 @@ HotnessPolicyConfig hotness_config(std::uint64_t min_admit_count = 2,
     config.min_admit_count = min_admit_count;
     config.reset_on_epoch_change = reset_on_epoch_change;
     return config;
+}
+
+ContentionPolicyConfig contention_config(double min_admit_score = 1.0) {
+    ContentionPolicyConfig config;
+    config.weights.local_hotness_weight = 0.0;
+    config.weights.remote_access_weight = 0.0;
+    config.weights.distinct_requester_weight = 0.0;
+    config.weights.queue_wait_weight = 0.0;
+    config.weights.remote_service_time_weight = 0.0;
+    config.weights.size_penalty_weight = 0.0;
+    config.min_admit_score = min_admit_score;
+    config.local_hotness_threshold = 2;
+    return config;
+}
+
+void record_remote_object(Stats& stats,
+                          ObjectId object_id,
+                          std::uint64_t accesses,
+                          dm_sim::SimTime queue_wait,
+                          dm_sim::SimTime service_time) {
+    for (std::uint64_t i = 0; i < accesses; ++i) {
+        const Request request = make_request(
+            i + 1,
+            object_id,
+            8,
+            0,
+            static_cast<dm_sim::NodeId>(i + 1));
+        stats.record_remote_access(request, static_cast<std::size_t>(i + 1));
+        stats.record_object_queue_wait(request, queue_wait);
+        stats.record_object_service(request, service_time);
+    }
+}
+
+bool near(double lhs, double rhs) {
+    return std::abs(lhs - rhs) < 1e-9;
 }
 
 void test_lookup_insert_then_hit() {
@@ -190,6 +238,80 @@ void test_global_replica_installation_respects_capacity_and_replaces_entries() {
     assert(cache.bytes_evicted() == 16);
 }
 
+void test_contention_policy_uses_local_hotness_for_epoch_zero() {
+    Stats stats;
+    ContentionPolicyConfig config = contention_config(1.0);
+    config.weights.local_hotness_weight = 1.0;
+
+    LocalCache cache(
+        16,
+        std::make_unique<ContentionAwarePolicy>(config, 16, stats));
+
+    const Request first = make_request(1, 9101, 8, 0);
+    assert(!cache.lookup(first, 1));
+    assert(!cache.admit(first, make_response(1, 9101), 2));
+
+    const Request second = make_request(2, 9101, 8, 0);
+    assert(!cache.lookup(second, 3));
+    assert(cache.admit(second, make_response(2, 9101), 4));
+    assert(cache.contains(9101));
+
+    const std::vector<PolicyDecisionRecord> diagnostics =
+        cache.policy_diagnostics();
+    assert(diagnostics.size() == 2);
+    assert(!diagnostics[0].admitted);
+    assert(diagnostics[1].admitted);
+    assert(near(diagnostics[0].score.total_score, 0.5));
+    assert(near(diagnostics[1].score.total_score, 1.0));
+}
+
+void test_contention_policy_scores_previous_epoch_contention() {
+    Stats stats;
+    record_remote_object(stats, 9201, 4, 6, 8);
+    record_remote_object(stats, 9202, 1, 1, 2);
+
+    ContentionPolicyConfig config = contention_config(0.0);
+    config.weights.remote_access_weight = 1.0;
+    config.weights.distinct_requester_weight = 1.0;
+    config.weights.queue_wait_weight = 1.0;
+    config.weights.remote_service_time_weight = 1.0;
+
+    ContentionAwarePolicy policy(config, 64, stats);
+    policy.on_epoch_start(1);
+
+    const auto hot_score = policy.score_object(9201, 8);
+    const auto cold_score = policy.score_object(9202, 8);
+    assert(near(hot_score.remote_accesses, 1.0));
+    assert(near(hot_score.queue_wait, 1.0));
+    assert(hot_score.total_score > cold_score.total_score);
+}
+
+void test_contention_policy_evicts_lowest_scored_resident() {
+    Stats stats;
+    record_remote_object(stats, 9301, 1, 1, 1);
+    record_remote_object(stats, 9302, 2, 1, 1);
+    record_remote_object(stats, 9303, 4, 1, 1);
+
+    ContentionPolicyConfig config = contention_config(0.0);
+    config.weights.remote_access_weight = 1.0;
+
+    ContentionAwarePolicy policy(config, 16, stats);
+    policy.on_epoch_start(1);
+
+    std::unordered_map<ObjectId, CacheEntry> entries;
+    entries.emplace(9301, CacheEntry{9301, 8, 1, 1});
+    entries.emplace(9302, CacheEntry{9302, 8, 2, 2});
+
+    const Request strong_incoming = make_request(1, 9303, 8, 1);
+    const std::optional<ObjectId> victim =
+        policy.select_victim(entries, strong_incoming);
+    assert(victim.has_value());
+    assert(*victim == 9301);
+
+    const Request weak_incoming = make_request(2, 9304, 8, 1);
+    assert(!policy.select_victim(entries, weak_incoming).has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -202,5 +324,8 @@ int main() {
     test_hotness_policy_evicts_coldest_resident();
     test_hotness_policy_resets_scores_on_epoch_change();
     test_global_replica_installation_respects_capacity_and_replaces_entries();
+    test_contention_policy_uses_local_hotness_for_epoch_zero();
+    test_contention_policy_scores_previous_epoch_contention();
+    test_contention_policy_evicts_lowest_scored_resident();
     return 0;
 }

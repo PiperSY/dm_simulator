@@ -1,5 +1,6 @@
 #include "sim/config_loader.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -52,10 +53,13 @@ LocalCachePolicyType parse_local_cache_policy(const std::string& value) {
     if (value == "global_hottest_replication") {
         return LocalCachePolicyType::GlobalHottestReplication;
     }
+    if (value == "contention_aware") {
+        return LocalCachePolicyType::ContentionAware;
+    }
 
     throw std::invalid_argument(
         "Invalid local_cache.policy: expected always_remote, lru, "
-        "hotness_only, or global_hottest_replication");
+        "hotness_only, global_hottest_replication, or contention_aware");
 }
 
 HotnessPolicyConfig parse_hotness_policy_config(
@@ -73,6 +77,87 @@ HotnessPolicyConfig parse_hotness_policy_config(
 
     if (const YAML::Node reset_on_epoch_change =
             hotness_node["reset_on_epoch_change"]) {
+        config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
+    }
+
+    return config;
+}
+
+double optional_nonnegative_double(const YAML::Node& node,
+                                   const std::string& key,
+                                   const std::string& context,
+                                   double current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const double value = child.as<double>();
+    if (!std::isfinite(value) || value < 0.0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a nonnegative finite number");
+    }
+
+    return value;
+}
+
+ContentionPolicyConfig parse_contention_policy_config(
+    const YAML::Node& local_cache_node) {
+    ContentionPolicyConfig config;
+
+    const YAML::Node contention_node = local_cache_node["contention"];
+    if (!contention_node) {
+        return config;
+    }
+
+    config.weights.local_hotness_weight = optional_nonnegative_double(
+        contention_node,
+        "local_hotness_weight",
+        "local_cache.contention",
+        config.weights.local_hotness_weight);
+    config.weights.remote_access_weight = optional_nonnegative_double(
+        contention_node,
+        "remote_access_weight",
+        "local_cache.contention",
+        config.weights.remote_access_weight);
+    config.weights.distinct_requester_weight = optional_nonnegative_double(
+        contention_node,
+        "distinct_requester_weight",
+        "local_cache.contention",
+        config.weights.distinct_requester_weight);
+    config.weights.queue_wait_weight = optional_nonnegative_double(
+        contention_node,
+        "queue_wait_weight",
+        "local_cache.contention",
+        config.weights.queue_wait_weight);
+    config.weights.remote_service_time_weight = optional_nonnegative_double(
+        contention_node,
+        "remote_service_time_weight",
+        "local_cache.contention",
+        config.weights.remote_service_time_weight);
+    config.weights.size_penalty_weight = optional_nonnegative_double(
+        contention_node,
+        "size_penalty_weight",
+        "local_cache.contention",
+        config.weights.size_penalty_weight);
+    config.min_admit_score = optional_nonnegative_double(
+        contention_node,
+        "min_admit_score",
+        "local_cache.contention",
+        config.min_admit_score);
+
+    if (const YAML::Node threshold =
+            contention_node["local_hotness_threshold"]) {
+        config.local_hotness_threshold = threshold.as<std::uint64_t>();
+        if (config.local_hotness_threshold == 0) {
+            throw std::invalid_argument(
+                "Invalid local_cache.contention.local_hotness_threshold: "
+                "expected a positive integer");
+        }
+    }
+
+    if (const YAML::Node reset_on_epoch_change =
+            contention_node["reset_on_epoch_change"]) {
         config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
     }
 
@@ -106,6 +191,54 @@ CrossNodeOverlap parse_cross_node_overlap(const std::string& value) {
 
     throw std::invalid_argument(
         "Invalid workload.cross_node_overlap: expected low, medium, or high");
+}
+
+ObjectSizeMode parse_object_size_mode(const std::string& value) {
+    if (value == "fixed") {
+        return ObjectSizeMode::Fixed;
+    }
+    if (value == "bimodal") {
+        return ObjectSizeMode::Bimodal;
+    }
+
+    throw std::invalid_argument(
+        "Invalid workload.object_size_mode: expected fixed or bimodal");
+}
+
+double optional_probability(const YAML::Node& node,
+                            const std::string& key,
+                            const std::string& context,
+                            double current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const double value = child.as<double>();
+    if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a finite number in [0, 1]");
+    }
+
+    return value;
+}
+
+std::uint64_t optional_positive_u64(const YAML::Node& node,
+                                    const std::string& key,
+                                    const std::string& context,
+                                    std::uint64_t current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const std::uint64_t value = child.as<std::uint64_t>();
+    if (value == 0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a positive integer");
+    }
+
+    return value;
 }
 
 // Parses a list of compute node IDs from a YAML node, throwing an exception if the node is not a sequence or if any ID cannot be converted to the expected type.
@@ -169,6 +302,7 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         parse_local_cache_policy(required_as<std::string>(
             local_cache_node, "policy", "local_cache")),
         parse_hotness_policy_config(local_cache_node),
+        parse_contention_policy_config(local_cache_node),
     };
 
     SyntheticWorkloadConfig workload;
@@ -178,6 +312,40 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         required_as<std::uint64_t>(workload_node, "object_count", "workload");
     workload.object_size_bytes = required_as<std::uint64_t>(
         workload_node, "object_size_bytes", "workload");
+    if (workload.object_size_bytes == 0) {
+        throw std::invalid_argument(
+            "Invalid workload.object_size_bytes: expected a positive integer");
+    }
+    workload.hot_set_churn_fraction = optional_probability(
+        workload_node,
+        "hot_set_churn_fraction",
+        "workload",
+        workload.hot_set_churn_fraction);
+    if (const YAML::Node object_size_mode_node =
+            workload_node["object_size_mode"]) {
+        workload.object_size_mode =
+            parse_object_size_mode(object_size_mode_node.as<std::string>());
+    }
+    workload.object_size_small_bytes = optional_positive_u64(
+        workload_node,
+        "object_size_small_bytes",
+        "workload",
+        workload.object_size_small_bytes);
+    workload.object_size_large_bytes = optional_positive_u64(
+        workload_node,
+        "object_size_large_bytes",
+        "workload",
+        workload.object_size_large_bytes);
+    if (workload.object_size_small_bytes > workload.object_size_large_bytes) {
+        throw std::invalid_argument(
+            "Invalid workload object size bounds: object_size_small_bytes "
+            "must not exceed object_size_large_bytes");
+    }
+    workload.large_object_probability = optional_probability(
+        workload_node,
+        "large_object_probability",
+        "workload",
+        workload.large_object_probability);
     workload.requests_per_node_per_epoch = required_as<std::size_t>(
         workload_node, "requests_per_node_per_epoch", "workload");
     workload.epoch_count =

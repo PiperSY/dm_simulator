@@ -33,4 +33,12 @@ RequestSpec WorkloadCursor::next() {
     return requests_[next_index_++];
 }
 
+const RequestSpec& WorkloadCursor::peek_next() const {
+    if (!has_next()) {
+        throw std::out_of_range("WorkloadCursor has no remaining requests");
+    }
+
+    return requests_[next_index_];
+}
+
 }  // namespace dm_sim

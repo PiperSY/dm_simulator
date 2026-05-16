@@ -64,6 +64,18 @@ const LocalCache& ComputeNode::local_cache() const noexcept {
     return local_cache_;
 }
 
+std::optional<EpochId> ComputeNode::next_request_epoch() const {
+    if (!workload_.has_next()) {
+        return std::nullopt;
+    }
+
+    return workload_.peek_next().epoch_id;
+}
+
+std::vector<PolicyDecisionRecord> ComputeNode::policy_diagnostics() const {
+    return local_cache_.policy_diagnostics();
+}
+
 void ComputeNode::handle_generate_request(const Event& event,
                                           Scheduler& scheduler) {
     if (!workload_.has_next()) {
@@ -174,7 +186,8 @@ void ComputeNode::handle_request_complete(const Event& event,
                                           Scheduler& scheduler) {
     (void)event;
 
-    if (workload_.has_next()) {
+    if (workload_.has_next() && current_epoch_.has_value() &&
+        workload_.peek_next().epoch_id == *current_epoch_) {
         scheduler.schedule(
             Event(scheduler.now(), EventType::GenerateRequest, node_id_));
     }

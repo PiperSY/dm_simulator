@@ -1,0 +1,38 @@
+experiment:
+  name: phase8_contention_aware
+  output_dir: results/phase8_contention_aware
+
+memory:
+  node_id: 99
+  base_latency: 25
+  bandwidth_bytes_per_time: 16
+
+link:
+  one_way_latency: 6
+
+local_cache:
+  capacity_bytes: 256
+  hit_latency: 1
+  policy: contention_aware
+  contention:
+    local_hotness_weight: 1.0
+    remote_access_weight: 1.0
+    distinct_requester_weight: 1.5
+    queue_wait_weight: 2.0
+    remote_service_time_weight: 1.0
+    size_penalty_weight: 0.5
+    min_admit_score: 1.0
+    local_hotness_threshold: 2
+    reset_on_epoch_change: true
+
+workload:
+  seed: 8888
+  compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8]
+  object_count: 128
+  object_size_bytes: 64
+  requests_per_node_per_epoch: 512
+  epoch_count: 10
+  hot_set_size: 8
+  hot_access_probability: 0.8
+  hot_set_mode: epoch_shift
+  cross_node_overlap: medium

@@ -29,22 +29,46 @@ bool LocalCache::lookup(const Request& request, SimTime access_time) {
 bool LocalCache::admit(const Request& request,
                        const Response& response,
                        SimTime access_time) {
+    std::vector<ObjectId> planned_victims;
+    auto record_result = [&](bool admitted, const char* reason) {
+        policy_->on_admission_result(request,
+                                     response,
+                                     access_time,
+                                     admitted,
+                                     reason,
+                                     planned_victims);
+        return admitted;
+    };
+
     if (!policy_->should_admit(request, response)) {
-        return false;
+        return record_result(false, "policy_rejected");
     }
 
     if (request.size_bytes > capacity_bytes_) {
-        return false;
+        return record_result(false, "object_too_large");
     }
 
-    while (occupancy_bytes_ + request.size_bytes > capacity_bytes_) {
+    std::unordered_map<ObjectId, CacheEntry> candidate_entries = entries_;
+    std::size_t projected_occupancy = occupancy_bytes_;
+    while (projected_occupancy + request.size_bytes > capacity_bytes_) {
         const std::optional<ObjectId> victim =
-            policy_->select_victim(entries_, request);
+            policy_->select_victim(candidate_entries, request);
         if (!victim.has_value()) {
-            return false;
+            return record_result(false, "no_victim");
         }
 
-        evict(*victim);
+        const auto victim_it = candidate_entries.find(*victim);
+        if (victim_it == candidate_entries.end()) {
+            return record_result(false, "invalid_victim");
+        }
+
+        projected_occupancy -= victim_it->second.size_bytes;
+        planned_victims.push_back(*victim);
+        candidate_entries.erase(victim_it);
+    }
+
+    for (ObjectId victim : planned_victims) {
+        evict(victim);
     }
 
     CacheEntry entry;
@@ -57,7 +81,7 @@ bool LocalCache::admit(const Request& request,
     occupancy_bytes_ += entry.size_bytes;
     bytes_admitted_ += entry.size_bytes;
     entries_[entry.object_id] = entry;
-    return true;
+    return record_result(true, "admitted");
 }
 
 void LocalCache::on_epoch_start(EpochId epoch_id) {
@@ -121,6 +145,10 @@ std::uint64_t LocalCache::bytes_admitted() const noexcept {
 
 std::uint64_t LocalCache::bytes_evicted() const noexcept {
     return bytes_evicted_;
+}
+
+std::vector<PolicyDecisionRecord> LocalCache::policy_diagnostics() const {
+    return policy_->diagnostics();
 }
 
 void LocalCache::evict(ObjectId object_id) {
