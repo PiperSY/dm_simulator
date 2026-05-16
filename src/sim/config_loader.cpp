@@ -193,6 +193,54 @@ CrossNodeOverlap parse_cross_node_overlap(const std::string& value) {
         "Invalid workload.cross_node_overlap: expected low, medium, or high");
 }
 
+ObjectSizeMode parse_object_size_mode(const std::string& value) {
+    if (value == "fixed") {
+        return ObjectSizeMode::Fixed;
+    }
+    if (value == "bimodal") {
+        return ObjectSizeMode::Bimodal;
+    }
+
+    throw std::invalid_argument(
+        "Invalid workload.object_size_mode: expected fixed or bimodal");
+}
+
+double optional_probability(const YAML::Node& node,
+                            const std::string& key,
+                            const std::string& context,
+                            double current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const double value = child.as<double>();
+    if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a finite number in [0, 1]");
+    }
+
+    return value;
+}
+
+std::uint64_t optional_positive_u64(const YAML::Node& node,
+                                    const std::string& key,
+                                    const std::string& context,
+                                    std::uint64_t current_value) {
+    const YAML::Node child = node[key];
+    if (!child) {
+        return current_value;
+    }
+
+    const std::uint64_t value = child.as<std::uint64_t>();
+    if (value == 0) {
+        throw std::invalid_argument("Invalid " + context + "." + key +
+                                    ": expected a positive integer");
+    }
+
+    return value;
+}
+
 // Parses a list of compute node IDs from a YAML node, throwing an exception if the node is not a sequence or if any ID cannot be converted to the expected type.
 std::vector<NodeId> parse_compute_node_ids(const YAML::Node& workload_node) {
     const YAML::Node ids_node =
@@ -264,6 +312,40 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         required_as<std::uint64_t>(workload_node, "object_count", "workload");
     workload.object_size_bytes = required_as<std::uint64_t>(
         workload_node, "object_size_bytes", "workload");
+    if (workload.object_size_bytes == 0) {
+        throw std::invalid_argument(
+            "Invalid workload.object_size_bytes: expected a positive integer");
+    }
+    workload.hot_set_churn_fraction = optional_probability(
+        workload_node,
+        "hot_set_churn_fraction",
+        "workload",
+        workload.hot_set_churn_fraction);
+    if (const YAML::Node object_size_mode_node =
+            workload_node["object_size_mode"]) {
+        workload.object_size_mode =
+            parse_object_size_mode(object_size_mode_node.as<std::string>());
+    }
+    workload.object_size_small_bytes = optional_positive_u64(
+        workload_node,
+        "object_size_small_bytes",
+        "workload",
+        workload.object_size_small_bytes);
+    workload.object_size_large_bytes = optional_positive_u64(
+        workload_node,
+        "object_size_large_bytes",
+        "workload",
+        workload.object_size_large_bytes);
+    if (workload.object_size_small_bytes > workload.object_size_large_bytes) {
+        throw std::invalid_argument(
+            "Invalid workload object size bounds: object_size_small_bytes "
+            "must not exceed object_size_large_bytes");
+    }
+    workload.large_object_probability = optional_probability(
+        workload_node,
+        "large_object_probability",
+        "workload",
+        workload.large_object_probability);
     workload.requests_per_node_per_epoch = required_as<std::size_t>(
         workload_node, "requests_per_node_per_epoch", "workload");
     workload.epoch_count =
