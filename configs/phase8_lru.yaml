@@ -17,11 +17,11 @@ local_cache:
 
 workload:
   seed: 8888
-  compute_node_ids: [1, 2, 3, 4]
+  compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8]
   object_count: 128
   object_size_bytes: 64
-  requests_per_node_per_epoch: 16
-  epoch_count: 3
+  requests_per_node_per_epoch: 512
+  epoch_count: 10
   hot_set_size: 8
   hot_access_probability: 0.8
   hot_set_mode: epoch_shift
