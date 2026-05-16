@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -16,6 +17,7 @@ using dm_sim::HotSetMode;
 using dm_sim::NodeId;
 using dm_sim::NodeWorkload;
 using dm_sim::ObjectId;
+using dm_sim::ObjectSizeMode;
 using dm_sim::RequestSpec;
 using dm_sim::SyntheticWorkloadConfig;
 using dm_sim::WorkloadCursor;
@@ -90,6 +92,20 @@ std::size_t intersection_size(const std::vector<ObjectId>& lhs,
     return count;
 }
 
+std::size_t positional_difference_count(const std::vector<ObjectId>& lhs,
+                                        const std::vector<ObjectId>& rhs) {
+    assert(lhs.size() == rhs.size());
+
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i] != rhs[i]) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
 const std::vector<ObjectId>& hot_set_for_node(
     const EpochHotSetMetadata& epoch_metadata,
     NodeId node_id) {
@@ -154,6 +170,61 @@ void test_epoch_shift_changes_hot_sets() {
     assert(saw_change);
 }
 
+void test_epoch_shift_zero_churn_keeps_hot_sets_stable() {
+    SyntheticWorkloadConfig config = make_config();
+    config.hot_set_mode = HotSetMode::EpochShift;
+    config.hot_set_churn_fraction = 0.0;
+    config.cross_node_overlap = CrossNodeOverlap::Low;
+
+    const GeneratedWorkload workload = generate_synthetic_workload(config);
+
+    for (NodeId node_id : config.compute_node_ids) {
+        const std::vector<ObjectId>& first_epoch_hot_set =
+            hot_set_for_node(workload.epochs.front(), node_id);
+        for (const EpochHotSetMetadata& epoch_metadata : workload.epochs) {
+            assert(hot_set_for_node(epoch_metadata, node_id) == first_epoch_hot_set);
+        }
+    }
+}
+
+void test_epoch_shift_full_churn_replaces_hot_sets() {
+    SyntheticWorkloadConfig config = make_config();
+    config.compute_node_ids = {1, 2};
+    config.object_count = 64;
+    config.hot_set_size = 4;
+    config.hot_set_mode = HotSetMode::EpochShift;
+    config.hot_set_churn_fraction = 1.0;
+    config.cross_node_overlap = CrossNodeOverlap::Low;
+
+    const GeneratedWorkload workload = generate_synthetic_workload(config);
+
+    for (NodeId node_id : config.compute_node_ids) {
+        assert(intersection_size(hot_set_for_node(workload.epochs[0], node_id),
+                                 hot_set_for_node(workload.epochs[1], node_id)) ==
+               0);
+    }
+}
+
+void test_partial_churn_changes_configured_fraction_of_segments() {
+    SyntheticWorkloadConfig config = make_config();
+    config.compute_node_ids = {1, 2};
+    config.object_count = 64;
+    config.hot_set_size = 4;
+    config.hot_set_mode = HotSetMode::EpochShift;
+    config.hot_set_churn_fraction = 0.5;
+    config.cross_node_overlap = CrossNodeOverlap::Medium;
+
+    const GeneratedWorkload workload = generate_synthetic_workload(config);
+
+    const std::vector<ObjectId>& node_one_epoch_zero =
+        hot_set_for_node(workload.epochs[0], 1);
+    const std::vector<ObjectId>& node_one_epoch_one =
+        hot_set_for_node(workload.epochs[1], 1);
+    assert(positional_difference_count(node_one_epoch_zero,
+                                       node_one_epoch_one) == 2);
+    assert(intersection_size(node_one_epoch_zero, node_one_epoch_one) == 2);
+}
+
 void test_overlap_presets_shape_hot_sets() {
     SyntheticWorkloadConfig config = make_config();
     config.compute_node_ids = {1, 2};
@@ -178,6 +249,37 @@ void test_overlap_presets_shape_hot_sets() {
                              hot_set_for_node(low.epochs.front(), 2)) == 0);
 }
 
+void test_partial_churn_preserves_overlap_presets() {
+    SyntheticWorkloadConfig config = make_config();
+    config.compute_node_ids = {1, 2};
+    config.object_count = 64;
+    config.hot_set_size = 4;
+    config.epoch_count = 3;
+    config.hot_set_mode = HotSetMode::EpochShift;
+    config.hot_set_churn_fraction = 0.5;
+
+    config.cross_node_overlap = CrossNodeOverlap::High;
+    const GeneratedWorkload high = generate_synthetic_workload(config);
+    for (const EpochHotSetMetadata& epoch_metadata : high.epochs) {
+        assert(intersection_size(hot_set_for_node(epoch_metadata, 1),
+                                 hot_set_for_node(epoch_metadata, 2)) == 4);
+    }
+
+    config.cross_node_overlap = CrossNodeOverlap::Medium;
+    const GeneratedWorkload medium = generate_synthetic_workload(config);
+    for (const EpochHotSetMetadata& epoch_metadata : medium.epochs) {
+        assert(intersection_size(hot_set_for_node(epoch_metadata, 1),
+                                 hot_set_for_node(epoch_metadata, 2)) == 2);
+    }
+
+    config.cross_node_overlap = CrossNodeOverlap::Low;
+    const GeneratedWorkload low = generate_synthetic_workload(config);
+    for (const EpochHotSetMetadata& epoch_metadata : low.epochs) {
+        assert(intersection_size(hot_set_for_node(epoch_metadata, 1),
+                                 hot_set_for_node(epoch_metadata, 2)) == 0);
+    }
+}
+
 void test_generated_request_counts_and_epochs() {
     SyntheticWorkloadConfig config = make_config();
     config.requests_per_node_per_epoch = 5;
@@ -199,6 +301,60 @@ void test_generated_request_counts_and_epochs() {
                    config.object_size_bytes);
         }
     }
+}
+
+void test_bimodal_sizes_are_per_object_and_do_not_change_access_order() {
+    SyntheticWorkloadConfig fixed_config = make_config();
+    fixed_config.compute_node_ids = {1, 2};
+    fixed_config.object_count = 32;
+    fixed_config.requests_per_node_per_epoch = 32;
+    fixed_config.epoch_count = 2;
+    fixed_config.hot_set_mode = HotSetMode::EpochShift;
+    fixed_config.cross_node_overlap = CrossNodeOverlap::Medium;
+
+    SyntheticWorkloadConfig bimodal_config = fixed_config;
+    bimodal_config.object_size_mode = ObjectSizeMode::Bimodal;
+    bimodal_config.object_size_small_bytes = 8;
+    bimodal_config.object_size_large_bytes = 64;
+    bimodal_config.large_object_probability = 0.5;
+
+    const GeneratedWorkload fixed = generate_synthetic_workload(fixed_config);
+    const GeneratedWorkload bimodal = generate_synthetic_workload(bimodal_config);
+
+    bool saw_small = false;
+    bool saw_large = false;
+    std::unordered_map<ObjectId, std::uint64_t> size_by_object;
+    for (std::size_t node_index = 0;
+         node_index < fixed.node_workloads.size();
+         ++node_index) {
+        const std::vector<RequestSpec>& fixed_requests =
+            fixed.node_workloads[node_index].requests;
+        const std::vector<RequestSpec>& bimodal_requests =
+            bimodal.node_workloads[node_index].requests;
+        assert(fixed_requests.size() == bimodal_requests.size());
+
+        for (std::size_t i = 0; i < fixed_requests.size(); ++i) {
+            assert(fixed_requests[i].object_id == bimodal_requests[i].object_id);
+            assert(fixed_requests[i].epoch_id == bimodal_requests[i].epoch_id);
+
+            const std::uint64_t size = bimodal_requests[i].size_bytes;
+            assert(size == bimodal_config.object_size_small_bytes ||
+                   size == bimodal_config.object_size_large_bytes);
+            saw_small = saw_small ||
+                        size == bimodal_config.object_size_small_bytes;
+            saw_large = saw_large ||
+                        size == bimodal_config.object_size_large_bytes;
+
+            const auto [iterator, inserted] =
+                size_by_object.emplace(bimodal_requests[i].object_id, size);
+            if (!inserted) {
+                assert(iterator->second == size);
+            }
+        }
+    }
+
+    assert(saw_small);
+    assert(saw_large);
 }
 
 void test_workload_cursor_issues_requests_in_order() {
@@ -232,8 +388,13 @@ int main() {
     test_different_seed_can_change_workload();
     test_static_hot_sets_remain_stable_across_epochs();
     test_epoch_shift_changes_hot_sets();
+    test_epoch_shift_zero_churn_keeps_hot_sets_stable();
+    test_epoch_shift_full_churn_replaces_hot_sets();
+    test_partial_churn_changes_configured_fraction_of_segments();
     test_overlap_presets_shape_hot_sets();
+    test_partial_churn_preserves_overlap_presets();
     test_generated_request_counts_and_epochs();
+    test_bimodal_sizes_are_per_object_and_do_not_change_access_order();
     test_workload_cursor_issues_requests_in_order();
     return 0;
 }

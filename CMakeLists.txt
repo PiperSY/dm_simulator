@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
 
+find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 find_package(yaml-cpp REQUIRED)
 
 if(TARGET yaml-cpp::yaml-cpp)
@@ -129,3 +130,29 @@ target_link_libraries(test_experiment_runner
 )
 
 add_test(NAME experiment_runner COMMAND test_experiment_runner)
+
+add_test(
+    NAME experiment_matrix_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --dry-run
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_phase_b_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        phase_b
+        --policies
+        lru
+        --dry-run
+        --expect-runs
+        120
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_phase_b_dry_run
+)

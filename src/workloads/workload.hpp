@@ -24,6 +24,12 @@ enum class CrossNodeOverlap {
     High,
 };
 
+// Controls how generated request sizes are assigned.
+enum class ObjectSizeMode {
+    Fixed,
+    Bimodal,
+};
+
 // Parameters used to synthesize per-node request streams.
 struct SyntheticWorkloadConfig {
     // Seed for deterministic object shuffling and request selection.
@@ -34,6 +40,14 @@ struct SyntheticWorkloadConfig {
     std::uint64_t object_count = 0;
     // Size attached to every generated request.
     std::uint64_t object_size_bytes = 64;
+    // Fraction of each hot-set segment replaced between shifted epochs.
+    double hot_set_churn_fraction = 1.0;
+    // Controls whether object sizes are fixed or drawn once per object.
+    ObjectSizeMode object_size_mode = ObjectSizeMode::Fixed;
+    // Bimodal size parameters used when object_size_mode is Bimodal.
+    std::uint64_t object_size_small_bytes = 64;
+    std::uint64_t object_size_large_bytes = 256;
+    double large_object_probability = 0.1;
     // Number of requests generated for each node during each epoch.
     std::size_t requests_per_node_per_epoch = 0;
     // Number of epochs to generate.
