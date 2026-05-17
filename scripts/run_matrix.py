@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
-"""Generate and run matched dm_simulator experiment matrices."""
+"""Generate and run matched dm_simulator experiment matrices.
+
+The script builds families of comparable YAML configs, runs each config through
+the C++ simulator, and folds the resulting JSON/CSV outputs into one aggregate
+CSV. Presets define the default experiment space, while CLI flags narrow or
+override selected dimensions for quick probes.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +28,25 @@ POLICIES = (
     "contention_aware",
 )
 
+# Named bandwidth levels map to simulator units in write_yaml_config().
+MEMORY_BANDWIDTH_BYTES_PER_TIME_BY_LEVEL = {
+    "mild": 64,
+    "moderate": 16,
+    "severe": 4,
+}
+
+MEMORY_BASE_LATENCY_BY_LEVEL = {
+    "low": 10,
+    "medium": 25,
+    "high": 75,
+}
+
+LINK_LATENCY_BY_LEVEL = {
+    "low": 2,
+    "medium": 6,
+    "high": 20,
+}
+
 AGGREGATE_COLUMNS = (
     "status",
     "error",
@@ -30,6 +55,7 @@ AGGREGATE_COLUMNS = (
     "policy",
     "seed",
     "node_count",
+    "compute_node_count",
     "epoch_count",
     "requests_per_node_per_epoch",
     "hot_set_mode",
@@ -41,8 +67,14 @@ AGGREGATE_COLUMNS = (
     "object_size_small_bytes",
     "object_size_large_bytes",
     "large_object_probability",
+    "cache_capacity_hotset_multiplier",
     "cache_capacity_bytes",
+    "memory_bandwidth_level",
     "memory_bandwidth_bytes_per_time",
+    "memory_base_latency_level",
+    "memory_base_latency",
+    "link_latency_level",
+    "one_way_link_latency",
     "completed_requests",
     "mean_latency",
     "median_latency",
@@ -66,6 +98,16 @@ AGGREGATE_COLUMNS = (
     "per_node_hit_rate_max",
     "policy_admitted",
     "policy_rejected",
+    "admission_yield",
+    "reuse_after_admit_rate",
+    "stale_telemetry_rate",
+    "average_top_object_overlap",
+    "estimated_avoided_remote_accesses",
+    "estimated_avoided_queue_wait",
+    "estimated_avoided_remote_service_time",
+    "eviction_regret_count",
+    "remote_eviction_regret_count",
+    "jain_inverse_latency_fairness",
     "config_path",
     "output_dir",
 )
@@ -73,19 +115,58 @@ AGGREGATE_COLUMNS = (
 
 @dataclass(frozen=True)
 class MatrixPreset:
+    """Default experiment dimensions used to generate a matrix.
+
+    Attributes:
+        name: Short preset identifier used in run names and default paths.
+        memory_node_id: Node ID assigned to the single shared memory node.
+        cache_hit_latency: Local-cache hit latency written into generated YAML.
+        compute_node_ids: Maximum ordered pool of compute-node IDs available to
+            this preset. A run with N nodes uses the first N IDs.
+        compute_node_count_values: Default node-count sweep values.
+        object_count: Size of the synthetic object universe.
+        object_size_bytes: Fixed object size and representative size used for
+            cache-capacity calculations.
+        object_size_small_bytes: Small-object size for bimodal workloads.
+        object_size_large_bytes: Large-object size for bimodal workloads.
+        large_object_probability: Probability that an object is large in
+            bimodal mode.
+        cache_capacity_hotset_multipliers: Cache capacities expressed as
+            multiples of one hot set's representative byte size.
+        memory_bandwidth_levels: Named bandwidth sweep values. Names map
+            through MEMORY_BANDWIDTH_BYTES_PER_TIME_BY_LEVEL.
+        memory_base_latency_levels: Named memory base-latency sweep values.
+        link_latency_levels: Named one-way link-latency sweep values.
+        requests_per_node_per_epoch_values: Epoch-length sweep, measured as
+            requests issued by each compute node per epoch.
+        epoch_count: Number of synthetic workload epochs.
+        hot_set_size: Number of hot objects per node per epoch.
+        hot_access_probability: Probability that a generated request targets
+            that node's current hot set.
+        hot_set_mode: Workload hot-set mode, usually "static" or
+            "epoch_shift".
+        hot_set_churn_fractions: Fraction of hot objects replaced at epoch
+            boundaries when hot_set_mode is "epoch_shift".
+        cross_node_overlaps: Default cross-node hot-set overlap sweep values:
+            "low", "medium", or "high".
+        object_size_modes: Object-size mode sweep values: "fixed" or
+            "bimodal".
+    """
+
     name: str
     memory_node_id: int
-    memory_base_latency: int
-    memory_bandwidth_bytes_per_time: int
-    one_way_link_latency: int
-    cache_capacity_bytes: int
     cache_hit_latency: int
     compute_node_ids: tuple[int, ...]
+    compute_node_count_values: tuple[int, ...]
     object_count: int
     object_size_bytes: int
     object_size_small_bytes: int
     object_size_large_bytes: int
     large_object_probability: float
+    cache_capacity_hotset_multipliers: tuple[float, ...]
+    memory_bandwidth_levels: tuple[str, ...]
+    memory_base_latency_levels: tuple[str, ...]
+    link_latency_levels: tuple[str, ...]
     requests_per_node_per_epoch_values: tuple[int, ...]
     epoch_count: int
     hot_set_size: int
@@ -98,33 +179,61 @@ class MatrixPreset:
 
 @dataclass(frozen=True)
 class MatrixRun:
+    """One concrete generated experiment run from a preset's sweep space.
+
+    Attributes:
+        preset: The MatrixPreset this run was generated from.
+        policy: Cache policy name written to local_cache.policy.
+        seed: Synthetic workload RNG seed.
+        compute_node_count: Number of compute nodes active in this run.
+        requests_per_node_per_epoch: Workload epoch length for each node.
+        hot_set_churn_fraction: Fraction of hot-set entries replaced per epoch.
+        cross_node_overlap: Hot-set overlap level: "low", "medium", or "high".
+        object_size_mode: Object-size generation mode: "fixed" or "bimodal".
+        cache_capacity_hotset_multiplier: Cache size as a multiple of one hot
+            set's representative byte footprint.
+        memory_bandwidth_level: Named memory bandwidth setting.
+        memory_base_latency_level: Named memory base-latency setting.
+        link_latency_level: Named one-way link-latency setting.
+        run_name: Stable run identifier used for file and directory names.
+        config_path: Generated YAML config path for this run.
+        output_dir: Directory where the simulator writes this run's outputs.
+    """
+
     preset: MatrixPreset
     policy: str
     seed: int
+    compute_node_count: int
     requests_per_node_per_epoch: int
     hot_set_churn_fraction: float
     cross_node_overlap: str
     object_size_mode: str
+    cache_capacity_hotset_multiplier: float
+    memory_bandwidth_level: str
+    memory_base_latency_level: str
+    link_latency_level: str
     run_name: str
     config_path: Path
     output_dir: Path
 
 
 PRESETS = {
+    # Tiny smoke preset: safe default for checking script/build plumbing.
     "quick": MatrixPreset(
         name="quick",
         memory_node_id=99,
-        memory_base_latency=25,
-        memory_bandwidth_bytes_per_time=16,
-        one_way_link_latency=6,
-        cache_capacity_bytes=256,
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4),
+        compute_node_count_values=(4,),
         object_count=128,
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
         large_object_probability=0.1,
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("moderate",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(16,),
         epoch_count=3,
         hot_set_size=8,
@@ -134,20 +243,22 @@ PRESETS = {
         cross_node_overlaps=("medium",),
         object_size_modes=("fixed",),
     ),
+    # Recreates the original Phase 8 style policy comparison shape.
     "phase8": MatrixPreset(
         name="phase8",
         memory_node_id=99,
-        memory_base_latency=25,
-        memory_bandwidth_bytes_per_time=16,
-        one_way_link_latency=6,
-        cache_capacity_bytes=256,
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4, 5, 6, 7, 8),
+        compute_node_count_values=(8,),
         object_count=128,
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
         large_object_probability=0.1,
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("moderate",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(512,),
         epoch_count=10,
         hot_set_size=8,
@@ -157,20 +268,22 @@ PRESETS = {
         cross_node_overlaps=("medium",),
         object_size_modes=("fixed",),
     ),
+    # Workload realism sweep: temporal churn, overlap, and object-size modes.
     "phase_b": MatrixPreset(
         name="phase_b",
         memory_node_id=99,
-        memory_base_latency=25,
-        memory_bandwidth_bytes_per_time=16,
-        one_way_link_latency=6,
-        cache_capacity_bytes=512,
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4, 5, 6, 7, 8),
+        compute_node_count_values=(8,),
         object_count=256,
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
         large_object_probability=0.2,
+        cache_capacity_hotset_multipliers=(1.0,),
+        memory_bandwidth_levels=("moderate",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(16, 64, 256, 1024),
         epoch_count=8,
         hot_set_size=8,
@@ -180,10 +293,58 @@ PRESETS = {
         cross_node_overlaps=("low", "medium", "high"),
         object_size_modes=("fixed", "bimodal"),
     ),
+    # Architecture/bottleneck sweep: node count, cache pressure, and memory BW.
+    "phase_c": MatrixPreset(
+        name="phase_c",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(4, 8),
+        object_count=256,
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probability=0.2,
+        cache_capacity_hotset_multipliers=(0.5, 1.0, 2.0),
+        memory_bandwidth_levels=("moderate", "severe"),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(256,),
+        epoch_count=8,
+        hot_set_size=8,
+        hot_access_probability=0.8,
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.5,),
+        cross_node_overlaps=("medium",),
+        object_size_modes=("fixed",),
+    ),
 }
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI options that select a preset and optionally override sweeps.
+
+    User-facing parameters:
+        --preset: Built-in MatrixPreset to start from.
+        --binary: Path to the compiled dm_simulator executable.
+        --results-dir: Root directory for generated configs, run outputs, and
+            aggregate_summary.csv.
+        --seeds: Comma-separated workload seeds.
+        --policies: Comma-separated cache policy names to compare.
+        --node-counts: Comma-separated compute-node counts.
+        --cache-hotset-multipliers: Comma-separated cache capacity multipliers.
+        --memory-bandwidth-levels: Comma-separated named bandwidth levels.
+        --memory-base-latency-levels: Comma-separated named base latencies.
+        --link-latency-levels: Comma-separated named link latencies.
+        --churn-fractions: Comma-separated hot-set churn fractions in [0, 1].
+        --epoch-lengths: Comma-separated requests-per-node-per-epoch values.
+        --overlaps: Comma-separated cross-node overlap levels.
+        --object-size-modes: Comma-separated object-size generation modes.
+        --expect-runs: Optional dry-run assertion for generated run count.
+        --dry-run: Generate configs and aggregate rows without simulation.
+        --keep-going: Continue the matrix after a simulator failure.
+    """
+
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -213,6 +374,31 @@ def parse_args() -> argparse.Namespace:
         "--policies",
         default=",".join(POLICIES),
         help="Comma-separated policy list.",
+    )
+    parser.add_argument(
+        "--node-counts",
+        default=None,
+        help="Comma-separated compute-node counts overriding the preset.",
+    )
+    parser.add_argument(
+        "--cache-hotset-multipliers",
+        default=None,
+        help="Comma-separated cache capacities as multiples of hot-set bytes.",
+    )
+    parser.add_argument(
+        "--memory-bandwidth-levels",
+        default=None,
+        help="Comma-separated memory bandwidth levels: mild, moderate, severe.",
+    )
+    parser.add_argument(
+        "--memory-base-latency-levels",
+        default=None,
+        help="Comma-separated memory base-latency levels: low, medium, high.",
+    )
+    parser.add_argument(
+        "--link-latency-levels",
+        default=None,
+        help="Comma-separated link-latency levels: low, medium, high.",
     )
     parser.add_argument(
         "--churn-fractions",
@@ -254,10 +440,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_csv_list(value: str) -> list[str]:
+    """Split a comma-separated CLI value while ignoring empty items."""
+
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def parse_seeds(value: str) -> list[int]:
+    """Parse the workload seed list used to generate independent trials."""
+
     seeds = []
     for item in parse_csv_list(value):
         try:
@@ -270,6 +460,8 @@ def parse_seeds(value: str) -> list[int]:
 
 
 def parse_policies(value: str) -> list[str]:
+    """Parse and validate selected cache policies."""
+
     policies = parse_csv_list(value)
     if not policies:
         raise SystemExit("At least one policy is required")
@@ -286,6 +478,8 @@ def parse_policies(value: str) -> list[str]:
 
 
 def parse_positive_ints(value: str) -> list[int]:
+    """Parse comma-separated positive integers for sweep dimensions."""
+
     values = []
     for item in parse_csv_list(value):
         try:
@@ -300,7 +494,26 @@ def parse_positive_ints(value: str) -> list[int]:
     return values
 
 
+def parse_positive_floats(value: str, label: str) -> list[float]:
+    """Parse comma-separated positive finite floats for sweep dimensions."""
+
+    values = []
+    for item in parse_csv_list(value):
+        try:
+            parsed = float(item)
+        except ValueError as error:
+            raise SystemExit(f"Invalid {label} '{item}'") from error
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            raise SystemExit(f"Invalid {label} '{item}': expected > 0")
+        values.append(parsed)
+    if not values:
+        raise SystemExit(f"At least one {label} value is required")
+    return values
+
+
 def parse_probabilities(value: str, label: str) -> list[float]:
+    """Parse comma-separated probabilities constrained to [0, 1]."""
+
     values = []
     for item in parse_csv_list(value):
         try:
@@ -315,7 +528,28 @@ def parse_probabilities(value: str, label: str) -> list[float]:
     return values
 
 
+def parse_levels(value: str,
+                 allowed_levels: dict[str, int],
+                 label: str) -> list[str]:
+    """Parse named level values such as mild/moderate/severe."""
+
+    levels = parse_csv_list(value)
+    invalid = [level for level in levels if level not in allowed_levels]
+    if invalid:
+        raise SystemExit(
+            f"Invalid {label} value(s): "
+            + ", ".join(invalid)
+            + ". Expected one of: "
+            + ", ".join(allowed_levels)
+        )
+    if not levels:
+        raise SystemExit(f"At least one {label} value is required")
+    return levels
+
+
 def parse_overlaps(value: str) -> list[str]:
+    """Parse cross-node hot-set overlap names."""
+
     overlaps = parse_csv_list(value)
     invalid = [overlap for overlap in overlaps if overlap not in {"low", "medium", "high"}]
     if invalid:
@@ -330,6 +564,8 @@ def parse_overlaps(value: str) -> list[str]:
 
 
 def parse_object_size_modes(value: str) -> list[str]:
+    """Parse synthetic workload object-size modes."""
+
     modes = parse_csv_list(value)
     invalid = [mode for mode in modes if mode not in {"fixed", "bimodal"}]
     if invalid:
@@ -344,10 +580,14 @@ def parse_object_size_modes(value: str) -> list[str]:
 
 
 def slug_float(value: float) -> str:
+    """Convert a float into a path-safe token for run directory names."""
+
     return f"{value:g}".replace(".", "p")
 
 
 def hot_set_churn_label(hot_set_mode: str, churn_fraction: float) -> str:
+    """Return a compact human label for churn behavior."""
+
     if hot_set_mode == "static" or churn_fraction == 0.0:
         return "none"
     if churn_fraction == 1.0:
@@ -355,26 +595,75 @@ def hot_set_churn_label(hot_set_mode: str, churn_fraction: float) -> str:
     return "partial"
 
 
+def node_ids_for_run(run: MatrixRun) -> tuple[int, ...]:
+    """Select the compute-node IDs used by this run."""
+
+    if run.compute_node_count > len(run.preset.compute_node_ids):
+        raise SystemExit(
+            f"Preset {run.preset.name} only defines "
+            f"{len(run.preset.compute_node_ids)} compute node IDs"
+        )
+    return run.preset.compute_node_ids[:run.compute_node_count]
+
+
+def memory_bandwidth_bytes_per_time(run: MatrixRun) -> int:
+    """Resolve a run's named bandwidth level to simulator units."""
+
+    return MEMORY_BANDWIDTH_BYTES_PER_TIME_BY_LEVEL[run.memory_bandwidth_level]
+
+
+def memory_base_latency(run: MatrixRun) -> int:
+    """Resolve a run's named memory base-latency level."""
+
+    return MEMORY_BASE_LATENCY_BY_LEVEL[run.memory_base_latency_level]
+
+
+def one_way_link_latency(run: MatrixRun) -> int:
+    """Resolve a run's named one-way link-latency level."""
+
+    return LINK_LATENCY_BY_LEVEL[run.link_latency_level]
+
+
+def cache_capacity_bytes(run: MatrixRun) -> int:
+    """Compute cache capacity from hot-set size and multiplier."""
+
+    representative_object_size = run.preset.object_size_bytes
+    hot_set_bytes = run.preset.hot_set_size * representative_object_size
+    return max(
+        1,
+        int(round(hot_set_bytes * run.cache_capacity_hotset_multiplier)),
+    )
+
+
 def run_slug(preset: MatrixPreset,
              policy: str,
              seed: int,
+             compute_node_count: int,
              epoch_length: int,
              churn_fraction: float,
              overlap: str,
-             object_size_mode: str) -> str:
+             object_size_mode: str,
+             cache_multiplier: float,
+             memory_bandwidth_level: str,
+             memory_base_latency_level: str,
+             link_latency_level: str) -> str:
+    """Build a deterministic run name encoding all matrix dimensions."""
+
     return (
         f"{preset.name}"
         f"__policy-{policy}"
         f"__seed-{seed}"
-        f"__nodes-{len(preset.compute_node_ids)}"
+        f"__nodes-{compute_node_count}"
         f"__epochs-{preset.epoch_count}"
         f"__rpe-{epoch_length}"
         f"__mode-{preset.hot_set_mode}"
         f"__churn-{slug_float(churn_fraction)}"
         f"__overlap-{overlap}"
         f"__size-{object_size_mode}"
-        f"__cache-{preset.cache_capacity_bytes}"
-        f"__bw-{preset.memory_bandwidth_bytes_per_time}"
+        f"__cachex-{slug_float(cache_multiplier)}"
+        f"__bw-{memory_bandwidth_level}"
+        f"__base-{memory_base_latency_level}"
+        f"__link-{link_latency_level}"
     )
 
 
@@ -382,58 +671,91 @@ def build_runs(
     preset: MatrixPreset,
     policies: list[str],
     seeds: list[int],
+    node_counts: list[int],
     epoch_lengths: list[int],
     churn_fractions: list[float],
     overlaps: list[str],
     object_size_modes: list[str],
+    cache_multipliers: list[float],
+    memory_bandwidth_levels: list[str],
+    memory_base_latency_levels: list[str],
+    link_latency_levels: list[str],
     results_dir: Path,
 ) -> list[MatrixRun]:
+    """Expand selected sweep dimensions into concrete MatrixRun records."""
+
     config_dir = results_dir / "generated_configs"
     output_root = results_dir / "runs"
     runs = []
+    # This intentionally forms the full Cartesian product of selected
+    # dimensions so every policy is evaluated against matched workloads and
+    # architecture settings.
     for seed in seeds:
         for policy in policies:
-            for epoch_length in epoch_lengths:
-                for churn_fraction in churn_fractions:
-                    for overlap in overlaps:
-                        for object_size_mode in object_size_modes:
-                            name = run_slug(preset,
-                                            policy,
-                                            seed,
-                                            epoch_length,
-                                            churn_fraction,
-                                            overlap,
-                                            object_size_mode)
-                            runs.append(
-                                MatrixRun(
-                                    preset=preset,
-                                    policy=policy,
-                                    seed=seed,
-                                    requests_per_node_per_epoch=epoch_length,
-                                    hot_set_churn_fraction=churn_fraction,
-                                    cross_node_overlap=overlap,
-                                    object_size_mode=object_size_mode,
-                                    run_name=name,
-                                    config_path=config_dir / f"{name}.yaml",
-                                    output_dir=output_root / name,
-                                )
-                            )
+            for node_count in node_counts:
+                for epoch_length in epoch_lengths:
+                    for churn_fraction in churn_fractions:
+                        for overlap in overlaps:
+                            for object_size_mode in object_size_modes:
+                                for cache_multiplier in cache_multipliers:
+                                    for bandwidth_level in memory_bandwidth_levels:
+                                        for base_level in memory_base_latency_levels:
+                                            for link_level in link_latency_levels:
+                                                name = run_slug(
+                                                    preset,
+                                                    policy,
+                                                    seed,
+                                                    node_count,
+                                                    epoch_length,
+                                                    churn_fraction,
+                                                    overlap,
+                                                    object_size_mode,
+                                                    cache_multiplier,
+                                                    bandwidth_level,
+                                                    base_level,
+                                                    link_level,
+                                                )
+                                                runs.append(
+                                                    MatrixRun(
+                                                        preset=preset,
+                                                        policy=policy,
+                                                        seed=seed,
+                                                        compute_node_count=node_count,
+                                                        requests_per_node_per_epoch=epoch_length,
+                                                        hot_set_churn_fraction=churn_fraction,
+                                                        cross_node_overlap=overlap,
+                                                        object_size_mode=object_size_mode,
+                                                        cache_capacity_hotset_multiplier=cache_multiplier,
+                                                        memory_bandwidth_level=bandwidth_level,
+                                                        memory_base_latency_level=base_level,
+                                                        link_latency_level=link_level,
+                                                        run_name=name,
+                                                        config_path=config_dir / f"{name}.yaml",
+                                                        output_dir=output_root / name,
+                                                    )
+                                                )
     return runs
 
 
 def yaml_string(value: Any) -> str:
+    """Quote a scalar as a simple YAML single-quoted string."""
+
     escaped = str(value).replace("'", "''")
     return f"'{escaped}'"
 
 
 def yaml_bool(value: bool) -> str:
+    """Render a Python bool as YAML's lowercase boolean spelling."""
+
     return "true" if value else "false"
 
 
 def write_yaml_config(run: MatrixRun) -> None:
+    """Write the simulator YAML config for one matrix run."""
+
     preset = run.preset
     run.config_path.parent.mkdir(parents=True, exist_ok=True)
-    node_ids = ", ".join(str(node_id) for node_id in preset.compute_node_ids)
+    node_ids = ", ".join(str(node_id) for node_id in node_ids_for_run(run))
 
     lines = [
         "experiment:",
@@ -442,21 +764,20 @@ def write_yaml_config(run: MatrixRun) -> None:
         "",
         "memory:",
         f"  node_id: {preset.memory_node_id}",
-        f"  base_latency: {preset.memory_base_latency}",
-        (
-            "  bandwidth_bytes_per_time: "
-            f"{preset.memory_bandwidth_bytes_per_time}"
-        ),
+        f"  base_latency: {memory_base_latency(run)}",
+        f"  bandwidth_bytes_per_time: {memory_bandwidth_bytes_per_time(run)}",
         "",
         "link:",
-        f"  one_way_latency: {preset.one_way_link_latency}",
+        f"  one_way_latency: {one_way_link_latency(run)}",
         "",
         "local_cache:",
-        f"  capacity_bytes: {preset.cache_capacity_bytes}",
+        f"  capacity_bytes: {cache_capacity_bytes(run)}",
         f"  hit_latency: {preset.cache_hit_latency}",
         f"  policy: {run.policy}",
     ]
 
+    # Most policies need only the shared local_cache fields. These blocks add
+    # policy-specific knobs while keeping the workload/architecture matched.
     if run.policy == "hotness_only":
         lines.extend(
             [
@@ -494,10 +815,7 @@ def write_yaml_config(run: MatrixRun) -> None:
             f"  object_size_small_bytes: {preset.object_size_small_bytes}",
             f"  object_size_large_bytes: {preset.object_size_large_bytes}",
             f"  large_object_probability: {preset.large_object_probability:g}",
-            (
-                "  requests_per_node_per_epoch: "
-                f"{run.requests_per_node_per_epoch}"
-            ),
+            f"  requests_per_node_per_epoch: {run.requests_per_node_per_epoch}",
             f"  epoch_count: {preset.epoch_count}",
             f"  hot_set_size: {preset.hot_set_size}",
             f"  hot_access_probability: {preset.hot_access_probability}",
@@ -511,6 +829,8 @@ def write_yaml_config(run: MatrixRun) -> None:
 
 
 def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
+    """Create aggregate CSV columns that are known before a run executes."""
+
     preset = run.preset
     return {
         "status": status,
@@ -519,7 +839,8 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "experiment_name": run.run_name,
         "policy": run.policy,
         "seed": run.seed,
-        "node_count": len(preset.compute_node_ids),
+        "node_count": run.compute_node_count,
+        "compute_node_count": run.compute_node_count,
         "epoch_count": preset.epoch_count,
         "requests_per_node_per_epoch": run.requests_per_node_per_epoch,
         "hot_set_mode": preset.hot_set_mode,
@@ -534,31 +855,45 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "object_size_small_bytes": preset.object_size_small_bytes,
         "object_size_large_bytes": preset.object_size_large_bytes,
         "large_object_probability": preset.large_object_probability,
-        "cache_capacity_bytes": preset.cache_capacity_bytes,
-        "memory_bandwidth_bytes_per_time": (
-            preset.memory_bandwidth_bytes_per_time
+        "cache_capacity_hotset_multiplier": (
+            run.cache_capacity_hotset_multiplier
         ),
+        "cache_capacity_bytes": cache_capacity_bytes(run),
+        "memory_bandwidth_level": run.memory_bandwidth_level,
+        "memory_bandwidth_bytes_per_time": memory_bandwidth_bytes_per_time(run),
+        "memory_base_latency_level": run.memory_base_latency_level,
+        "memory_base_latency": memory_base_latency(run),
+        "link_latency_level": run.link_latency_level,
+        "one_way_link_latency": one_way_link_latency(run),
         "config_path": run.config_path,
         "output_dir": run.output_dir,
     }
 
 
 def read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object from a simulator output file."""
+
     with path.open("r", encoding="utf-8") as input_file:
         return json.load(input_file)
 
 
 def number_or_blank(value: Any) -> Any:
+    """Keep numeric values but render missing JSON fields as CSV blanks."""
+
     return "" if value is None else value
 
 
 def spread(values: list[float]) -> Any:
+    """Return max-min spread, or a blank for empty inputs."""
+
     if not values:
         return ""
     return max(values) - min(values)
 
 
 def aggregate_contention(output_dir: Path) -> dict[str, Any]:
+    """Summarize object-level contention rows into run-level totals."""
+
     path = output_dir / "contention_by_object.csv"
     totals = {
         "total_remote_accesses": 0,
@@ -584,6 +919,8 @@ def aggregate_contention(output_dir: Path) -> dict[str, Any]:
 
 
 def summarize_run(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
+    """Build one aggregate CSV row from simulator outputs."""
+
     row = base_row(run, status, error)
     if status != "success":
         return row
@@ -593,7 +930,10 @@ def summarize_run(run: MatrixRun, status: str, error: str = "") -> dict[str, Any
     cache = summary.get("cache", {})
     memory = summary.get("memory", {})
     policy = summary.get("policy", {})
+    viability = summary.get("viability", {})
     per_node = summary.get("per_node", [])
+    # Fairness-facing columns are derived from the per-node section so a single
+    # aggregate CSV can flag node imbalance without opening per_node.csv.
     per_node_mean_latencies = [
         float(node["mean_latency"]) for node in per_node if "mean_latency" in node
     ]
@@ -639,6 +979,36 @@ def summarize_run(run: MatrixRun, status: str, error: str = "") -> dict[str, Any
             ),
             "policy_admitted": number_or_blank(policy.get("admitted")),
             "policy_rejected": number_or_blank(policy.get("rejected")),
+            "admission_yield": number_or_blank(
+                viability.get("admission_yield")
+            ),
+            "reuse_after_admit_rate": number_or_blank(
+                viability.get("reuse_after_admit_rate")
+            ),
+            "stale_telemetry_rate": number_or_blank(
+                viability.get("stale_telemetry_rate")
+            ),
+            "average_top_object_overlap": number_or_blank(
+                viability.get("average_top_object_overlap")
+            ),
+            "estimated_avoided_remote_accesses": number_or_blank(
+                viability.get("estimated_avoided_remote_accesses")
+            ),
+            "estimated_avoided_queue_wait": number_or_blank(
+                viability.get("estimated_avoided_queue_wait")
+            ),
+            "estimated_avoided_remote_service_time": number_or_blank(
+                viability.get("estimated_avoided_remote_service_time")
+            ),
+            "eviction_regret_count": number_or_blank(
+                viability.get("eviction_regret_count")
+            ),
+            "remote_eviction_regret_count": number_or_blank(
+                viability.get("remote_eviction_regret_count")
+            ),
+            "jain_inverse_latency_fairness": number_or_blank(
+                viability.get("jain_inverse_latency_fairness")
+            ),
         }
     )
     row.update(aggregate_contention(run.output_dir))
@@ -646,6 +1016,8 @@ def summarize_run(run: MatrixRun, status: str, error: str = "") -> dict[str, Any
 
 
 def write_aggregate_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write the matrix-level aggregate CSV with a stable column order."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=AGGREGATE_COLUMNS)
@@ -655,6 +1027,8 @@ def write_aggregate_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def run_simulator(binary: Path, run: MatrixRun) -> None:
+    """Launch the C++ simulator for one generated config."""
+
     command = [
         str(binary),
         "--config",
@@ -672,6 +1046,8 @@ def verify_dry_run(
     selected_policies: list[str],
     aggregate_path: Path,
 ) -> None:
+    """Sanity-check dry-run output without launching the simulator."""
+
     run_names = [run.run_name for run in runs]
     if len(run_names) != len(set(run_names)):
         raise RuntimeError("Dry run generated duplicate run names")
@@ -690,9 +1066,16 @@ def verify_dry_run(
             + ", ".join(str(path) for path in missing_configs)
         )
 
+    # Dry-run tests only have generated YAML and synthetic aggregate rows, so
+    # verify the generated configs contain the key fields needed by later runs.
     for run in runs:
         config_text = run.config_path.read_text(encoding="utf-8")
         required_fields = (
+            f"compute_node_ids: [{', '.join(str(node_id) for node_id in node_ids_for_run(run))}]",
+            f"base_latency: {memory_base_latency(run)}",
+            f"bandwidth_bytes_per_time: {memory_bandwidth_bytes_per_time(run)}",
+            f"one_way_latency: {one_way_link_latency(run)}",
+            f"capacity_bytes: {cache_capacity_bytes(run)}",
             "hot_set_churn_fraction:",
             "object_size_mode:",
             "object_size_small_bytes:",
@@ -717,11 +1100,18 @@ def verify_dry_run(
 
 
 def main() -> int:
+    """Entry point: parse sweeps, generate configs, run, and aggregate."""
+
     repo_root = Path(__file__).resolve().parents[1]
     args = parse_args()
     preset = PRESETS[args.preset]
     seeds = parse_seeds(args.seeds)
     policies = parse_policies(args.policies)
+    node_counts = (
+        parse_positive_ints(args.node_counts)
+        if args.node_counts is not None
+        else list(preset.compute_node_count_values)
+    )
     epoch_lengths = (
         parse_positive_ints(args.epoch_lengths)
         if args.epoch_lengths is not None
@@ -742,6 +1132,44 @@ def main() -> int:
         if args.object_size_modes is not None
         else list(preset.object_size_modes)
     )
+    cache_multipliers = (
+        parse_positive_floats(args.cache_hotset_multipliers,
+                              "cache hot-set multiplier")
+        if args.cache_hotset_multipliers is not None
+        else list(preset.cache_capacity_hotset_multipliers)
+    )
+    memory_bandwidth_levels = (
+        parse_levels(args.memory_bandwidth_levels,
+                     MEMORY_BANDWIDTH_BYTES_PER_TIME_BY_LEVEL,
+                     "memory bandwidth level")
+        if args.memory_bandwidth_levels is not None
+        else list(preset.memory_bandwidth_levels)
+    )
+    memory_base_latency_levels = (
+        parse_levels(args.memory_base_latency_levels,
+                     MEMORY_BASE_LATENCY_BY_LEVEL,
+                     "memory base-latency level")
+        if args.memory_base_latency_levels is not None
+        else list(preset.memory_base_latency_levels)
+    )
+    link_latency_levels = (
+        parse_levels(args.link_latency_levels,
+                     LINK_LATENCY_BY_LEVEL,
+                     "link latency level")
+        if args.link_latency_levels is not None
+        else list(preset.link_latency_levels)
+    )
+    oversized_node_counts = [
+        node_count
+        for node_count in node_counts
+        if node_count > len(preset.compute_node_ids)
+    ]
+    if oversized_node_counts:
+        raise SystemExit(
+            f"Preset {preset.name} supports at most "
+            f"{len(preset.compute_node_ids)} compute nodes; invalid counts: "
+            + ", ".join(str(count) for count in oversized_node_counts)
+        )
     results_dir = (
         args.results_dir
         if args.results_dir is not None
@@ -752,10 +1180,15 @@ def main() -> int:
     runs = build_runs(preset,
                       policies,
                       seeds,
+                      node_counts,
                       epoch_lengths,
                       churn_fractions,
                       overlaps,
                       object_size_modes,
+                      cache_multipliers,
+                      memory_bandwidth_levels,
+                      memory_base_latency_levels,
+                      link_latency_levels,
                       results_dir)
     if args.expect_runs is not None and len(runs) != args.expect_runs:
         raise SystemExit(

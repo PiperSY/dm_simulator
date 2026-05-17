@@ -1,17 +1,17 @@
 experiment:
-  name: phase8_contention_aware
-  output_dir: results/phase8_contention_aware
+  name: phase_c_probe_contention_aware
+  output_dir: results/phase_c_probe_contention_aware
 
 memory:
   node_id: 99
   base_latency: 25
-  bandwidth_bytes_per_time: 16
+  bandwidth_bytes_per_time: 4
 
 link:
   one_way_latency: 6
 
 local_cache:
-  capacity_bytes: 512
+  capacity_bytes: 1024
   hit_latency: 1
   policy: contention_aware
   contention:
@@ -23,7 +23,7 @@ local_cache:
     size_penalty_weight: 0.5
     min_admit_score: 1.0
     local_hotness_threshold: 2
-    reset_on_epoch_change: true
+    reset_on_epoch_change: false
 
 workload:
   seed: 8888
@@ -31,13 +31,13 @@ workload:
   object_count: 256
   object_size_bytes: 64
   hot_set_churn_fraction: 0.4
-  object_size_mode: bimodal
+  object_size_mode: fixed
   object_size_small_bytes: 64
   object_size_large_bytes: 256
   large_object_probability: 0.2
-  requests_per_node_per_epoch: 64
+  requests_per_node_per_epoch: 16
   epoch_count: 8
-  hot_set_size: 8
-  hot_access_probability: 0.6
+  hot_set_size: 32
+  hot_access_probability: 0.8
   hot_set_mode: epoch_shift
-  cross_node_overlap: medium
+  cross_node_overlap: high

@@ -249,6 +249,47 @@ std::vector<PolicyDecisionRecord> Simulator::policy_diagnostics() const {
     return diagnostics;
 }
 
+std::vector<CacheAdmissionRecord>
+Simulator::cache_admission_diagnostics() const {
+    std::vector<CacheAdmissionRecord> diagnostics;
+    // Preserve configured node order while collecting local cache lifecycle
+    // records from each private compute-node cache.
+    for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
+        const auto compute_it = compute_nodes_.find(node_config.node_id);
+        if (compute_it == compute_nodes_.end()) {
+            continue;
+        }
+
+        std::vector<CacheAdmissionRecord> node_diagnostics =
+            compute_it->second->cache_admission_diagnostics();
+        diagnostics.insert(diagnostics.end(),
+                           node_diagnostics.begin(),
+                           node_diagnostics.end());
+    }
+
+    std::sort(diagnostics.begin(),
+              diagnostics.end(),
+              [](const CacheAdmissionRecord& lhs,
+                 const CacheAdmissionRecord& rhs) {
+                  // Stable ordering matters because these rows are consumed by
+                  // CSV tests and by human diffing during experiment analysis.
+                  if (lhs.time != rhs.time) {
+                      return lhs.time < rhs.time;
+                  }
+                  if (lhs.epoch_id != rhs.epoch_id) {
+                      return lhs.epoch_id < rhs.epoch_id;
+                  }
+                  if (lhs.node_id != rhs.node_id) {
+                      return lhs.node_id < rhs.node_id;
+                  }
+                  if (lhs.request_id != rhs.request_id) {
+                      return lhs.request_id < rhs.request_id;
+                  }
+                  return lhs.object_id < rhs.object_id;
+              });
+    return diagnostics;
+}
+
 void Simulator::dispatch_event(const Event& event, Scheduler& scheduler) {
     event_log_.push_back(
         EventRecord{event.time, event.type, event.target_id, event.request_id});

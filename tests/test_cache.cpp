@@ -16,6 +16,7 @@
 namespace {
 
 using dm_sim::AlwaysRemotePolicy;
+using dm_sim::CacheAdmissionRecord;
 using dm_sim::CacheReplica;
 using dm_sim::CacheEntry;
 using dm_sim::ContentionAwarePolicy;
@@ -112,6 +113,14 @@ void test_lookup_insert_then_hit() {
     assert(cache.hit_count() == 1);
     assert(cache.occupancy_bytes() == 16);
     assert(cache.bytes_admitted() == 16);
+
+    const std::vector<CacheAdmissionRecord>& admissions =
+        cache.cache_admission_diagnostics();
+    assert(admissions.size() == 1);
+    assert(admissions[0].admitted);
+    assert(admissions[0].future_hit_count == 1);
+    assert(admissions[0].reused_after_admit);
+    assert(admissions[0].placement_source == "remote_response");
 }
 
 void test_byte_capacity_and_lru_eviction() {
@@ -127,6 +136,18 @@ void test_byte_capacity_and_lru_eviction() {
     assert(cache.contains(1003));
     assert(cache.occupancy_bytes() == 16);
     assert(cache.bytes_evicted() == 8);
+
+    const std::vector<CacheAdmissionRecord>& admissions =
+        cache.cache_admission_diagnostics();
+    assert(admissions.size() == 3);
+    assert(admissions[0].object_id == 1001);
+    assert(admissions[0].future_hit_count == 1);
+    assert(admissions[0].evicted == false);
+    assert(admissions[1].object_id == 1002);
+    assert(admissions[1].evicted);
+    assert(admissions[1].eviction_time == 4);
+    assert(admissions[2].evicted_objects.size() == 1);
+    assert(admissions[2].evicted_objects[0] == 1002);
 }
 
 void test_always_remote_never_admits() {
@@ -136,6 +157,12 @@ void test_always_remote_never_admits() {
     assert(!cache.contains(2001));
     assert(cache.entry_count() == 0);
     assert(cache.occupancy_bytes() == 0);
+
+    const std::vector<CacheAdmissionRecord>& admissions =
+        cache.cache_admission_diagnostics();
+    assert(admissions.size() == 1);
+    assert(!admissions[0].admitted);
+    assert(admissions[0].reason == "policy_rejected");
 }
 
 void test_object_larger_than_capacity_is_rejected() {
@@ -143,6 +170,11 @@ void test_object_larger_than_capacity_is_rejected() {
 
     assert(!cache.admit(make_request(1, 3001, 16), make_response(1, 3001), 1));
     assert(cache.entry_count() == 0);
+    const std::vector<CacheAdmissionRecord>& admissions =
+        cache.cache_admission_diagnostics();
+    assert(admissions.size() == 1);
+    assert(!admissions[0].admitted);
+    assert(admissions[0].reason == "object_too_large");
 }
 
 void test_hotness_policy_counts_hits_and_misses() {
@@ -229,13 +261,28 @@ void test_global_replica_installation_respects_capacity_and_replaces_entries() {
     assert(cache.miss_count() == 0);
     assert(cache.bytes_admitted() == 16);
 
-    cache.install_replicas({CacheReplica{9001, 8}}, 2);
+    const std::vector<CacheAdmissionRecord>& first_admissions =
+        cache.cache_admission_diagnostics();
+    assert(first_admissions.size() == 2);
+    assert(first_admissions[0].placement_source == "global_replica");
+
+    cache.install_replicas({CacheReplica{9001, 8}}, 2, 7, 1);
     assert(!cache.contains(8001));
     assert(!cache.contains(8002));
     assert(cache.contains(9001));
     assert(cache.entry_count() == 1);
     assert(cache.occupancy_bytes() == 8);
     assert(cache.bytes_evicted() == 16);
+
+    const std::vector<CacheAdmissionRecord>& admissions =
+        cache.cache_admission_diagnostics();
+    assert(admissions.size() == 3);
+    assert(admissions[0].evicted);
+    assert(admissions[0].eviction_time == 2);
+    assert(admissions[2].node_id == 7);
+    assert(admissions[2].epoch_id == 1);
+    assert(admissions[2].object_id == 9001);
+    assert(admissions[2].placement_source == "global_replica");
 }
 
 void test_contention_policy_uses_local_hotness_for_epoch_zero() {

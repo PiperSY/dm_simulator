@@ -22,6 +22,42 @@ struct PerNodeMetricsSummary {
     double local_cache_hit_rate = 0.0;
 };
 
+struct EpochDiagnosticSummary {
+    EpochId epoch_id = 0;
+    std::size_t previous_top_count = 0;
+    std::size_t current_top_count = 0;
+    std::size_t overlap_count = 0;
+    double top_object_overlap = 0.0;
+    double stale_telemetry_rate = 0.0;
+    std::vector<ObjectId> previous_top_contended;
+    std::vector<ObjectId> current_top_requested;
+};
+
+// Run-level diagnostics intended to explain policy viability, not just raw
+// latency. Most fields are derived after the simulation from cache lifecycle,
+// request, response, and contention telemetry.
+struct ViabilityMetricsSummary {
+    std::size_t top_k = 5;
+    std::size_t admission_attempts = 0;
+    std::size_t successful_placements = 0;
+    std::size_t rejected_admissions = 0;
+    std::size_t total_future_hits = 0;
+    double admission_yield = 0.0;
+    std::size_t placements_with_reuse = 0;
+    double reuse_after_admit_rate = 0.0;
+    double stale_telemetry_rate = 0.0;
+    double average_top_object_overlap = 0.0;
+    std::size_t estimated_avoided_remote_accesses = 0;
+    double estimated_avoided_queue_wait = 0.0;
+    double estimated_avoided_remote_service_time = 0.0;
+    std::size_t eviction_regret_count = 0;
+    std::size_t remote_eviction_regret_count = 0;
+    double per_node_mean_latency_spread = 0.0;
+    double per_node_p99_latency_spread = 0.0;
+    double jain_inverse_latency_fairness = 0.0;
+    std::vector<EpochDiagnosticSummary> epoch_diagnostics;
+};
+
 // Summary of metrics for a single experiment, including overall statistics and per-node breakdowns.
 struct MetricsSummary {
     std::string experiment_name;
@@ -42,6 +78,7 @@ struct MetricsSummary {
     std::size_t policy_rejected = 0;
     std::vector<PolicyDecisionRecord> top_policy_decisions;
     std::vector<PerNodeMetricsSummary> per_node;
+    ViabilityMetricsSummary viability;
 };
 
 // Result of running an experiment, including the configuration, summarized metrics, and output directory for results.
@@ -55,6 +92,9 @@ struct ExperimentResult {
 [[nodiscard]] MetricsSummary summarize_metrics(
     const std::string& experiment_name,
     const Simulator& simulator);
+[[nodiscard]] ViabilityMetricsSummary summarize_viability_metrics(
+    const Simulator& simulator,
+    const std::vector<PerNodeMetricsSummary>& per_node);
 
 // ExperimentRunner class responsible for running experiments based on configuration files, executing simulations, and summarizing results.
 class ExperimentRunner {

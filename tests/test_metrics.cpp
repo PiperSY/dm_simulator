@@ -176,6 +176,80 @@ void test_cache_hits_do_not_increment_remote_contention() {
     assert(simulator.stats().all_contention_stats().size() == 1);
 }
 
+void test_viability_metrics_track_reuse_relief_and_overlap() {
+    dm_sim::SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = dm_sim::LocalCacheConfig{
+        8,
+        1,
+        dm_sim::LocalCachePolicyType::Lru,
+    };
+    config.compute_nodes = {
+        dm_sim::ComputeNodeConfig{
+            1,
+            {
+                dm_sim::RequestSpec{9201, 8, 0},
+                dm_sim::RequestSpec{9201, 8, 0},
+                dm_sim::RequestSpec{9201, 8, 1},
+                dm_sim::RequestSpec{9201, 8, 1},
+            },
+        },
+    };
+
+    dm_sim::Simulator simulator(config);
+    simulator.run();
+
+    const dm_sim::MetricsSummary summary =
+        dm_sim::summarize_metrics("viability_reuse", simulator);
+    const dm_sim::ViabilityMetricsSummary& viability = summary.viability;
+
+    assert(viability.successful_placements == 1);
+    assert(viability.rejected_admissions == 0);
+    assert(viability.total_future_hits == 3);
+    assert(near(viability.admission_yield, 3.0));
+    assert(near(viability.reuse_after_admit_rate, 1.0));
+    assert(near(viability.average_top_object_overlap, 1.0));
+    assert(near(viability.stale_telemetry_rate, 0.0));
+    assert(viability.estimated_avoided_remote_accesses == 3);
+    assert(viability.estimated_avoided_remote_service_time > 0.0);
+    assert(near(viability.jain_inverse_latency_fairness, 1.0));
+}
+
+void test_viability_metrics_detect_eviction_regret() {
+    dm_sim::SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = dm_sim::LocalCacheConfig{
+        8,
+        1,
+        dm_sim::LocalCachePolicyType::Lru,
+    };
+    config.compute_nodes = {
+        dm_sim::ComputeNodeConfig{
+            1,
+            {
+                dm_sim::RequestSpec{9301, 8, 0},
+                dm_sim::RequestSpec{9302, 8, 0},
+                dm_sim::RequestSpec{9301, 8, 0},
+            },
+        },
+    };
+
+    dm_sim::Simulator simulator(config);
+    simulator.run();
+
+    const dm_sim::MetricsSummary summary =
+        dm_sim::summarize_metrics("viability_regret", simulator);
+
+    assert(summary.viability.eviction_regret_count == 1);
+    assert(summary.viability.remote_eviction_regret_count == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -183,5 +257,7 @@ int main() {
     test_metrics_summary_includes_per_node_values();
     test_contention_aggregation_records_remote_signals();
     test_cache_hits_do_not_increment_remote_contention();
+    test_viability_metrics_track_reuse_relief_and_overlap();
+    test_viability_metrics_detect_eviction_regret();
     return 0;
 }
