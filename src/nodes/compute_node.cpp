@@ -76,6 +76,13 @@ std::vector<PolicyDecisionRecord> ComputeNode::policy_diagnostics() const {
     return local_cache_.policy_diagnostics();
 }
 
+std::vector<CacheAdmissionRecord>
+ComputeNode::cache_admission_diagnostics() const {
+    const std::vector<CacheAdmissionRecord>& records =
+        local_cache_.cache_admission_diagnostics();
+    return {records.begin(), records.end()};
+}
+
 void ComputeNode::handle_generate_request(const Event& event,
                                           Scheduler& scheduler) {
     if (!workload_.has_next()) {
@@ -207,11 +214,11 @@ void ComputeNode::start_epoch_if_needed(EpochId epoch_id, SimTime event_time) {
 
     const auto it = global_replica_plan_->find(epoch_id);
     if (it == global_replica_plan_->end()) {
-        local_cache_.install_replicas({}, event_time);
+        local_cache_.install_replicas({}, event_time, node_id_, epoch_id);
         return;
     }
 
-    local_cache_.install_replicas(it->second, event_time);
+    local_cache_.install_replicas(it->second, event_time, node_id_, epoch_id);
 }
 
 }  // namespace dm_sim

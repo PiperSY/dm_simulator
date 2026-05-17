@@ -79,6 +79,9 @@ void test_runner_writes_expected_outputs() {
     assert(std::filesystem::exists(output_dir / "latencies.csv"));
     assert(std::filesystem::exists(output_dir / "contention_by_object.csv"));
     assert(std::filesystem::exists(output_dir / "policy_diagnostics.csv"));
+    assert(std::filesystem::exists(output_dir / "cache_admissions.csv"));
+    assert(std::filesystem::exists(output_dir / "epoch_diagnostics.csv"));
+    assert(std::filesystem::exists(output_dir / "viability_metrics.csv"));
 
     const std::string summary_json = read_file(output_dir / "summary.json");
     assert(summary_json.find("\"experiment_name\": \"runner_test\"") !=
@@ -89,12 +92,17 @@ void test_runner_writes_expected_outputs() {
     assert(summary_json.find("\"top_by_queue_wait\"") != std::string::npos);
     assert(summary_json.find("\"policy\"") != std::string::npos);
     assert(summary_json.find("\"top_decisions_by_score\"") != std::string::npos);
+    assert(summary_json.find("\"viability\"") != std::string::npos);
+    assert(summary_json.find("\"admission_yield\"") != std::string::npos);
     assert(summary_json.find("\"per_node\"") != std::string::npos);
 
     assert(line_count(output_dir / "per_node.csv") == 3);
     assert(line_count(output_dir / "latencies.csv") == 5);
     assert(line_count(output_dir / "contention_by_object.csv") == 2);
     assert(line_count(output_dir / "policy_diagnostics.csv") == 1);
+    assert(line_count(output_dir / "cache_admissions.csv") == 3);
+    assert(line_count(output_dir / "epoch_diagnostics.csv") == 1);
+    assert(line_count(output_dir / "viability_metrics.csv") == 2);
 }
 
 }  // namespace

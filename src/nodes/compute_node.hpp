@@ -47,6 +47,10 @@ public:
     [[nodiscard]] const LocalCache& local_cache() const noexcept;
     [[nodiscard]] std::optional<EpochId> next_request_epoch() const;
     [[nodiscard]] std::vector<PolicyDecisionRecord> policy_diagnostics() const;
+    // Copies local-cache lifecycle diagnostics so Simulator can aggregate all
+    // compute nodes without exposing mutable cache internals.
+    [[nodiscard]] std::vector<CacheAdmissionRecord>
+    cache_admission_diagnostics() const;
 
 private:
     // Event handler methods for different event types, including request generation, local cache lookups, cache hit completions, response handling, and request completion.

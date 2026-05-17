@@ -156,3 +156,19 @@ add_test(
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_phase_b_dry_run
 )
+
+add_test(
+    NAME experiment_matrix_phase_c_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        phase_c
+        --policies
+        lru
+        --dry-run
+        --expect-runs
+        12
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_phase_c_dry_run
+)

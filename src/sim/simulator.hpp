@@ -54,6 +54,10 @@ public:
     [[nodiscard]] const std::optional<GeneratedWorkload>& generated_workload()
         const noexcept;
     [[nodiscard]] std::vector<PolicyDecisionRecord> policy_diagnostics() const;
+    // Returns policy-neutral cache lifecycle rows from all compute nodes,
+    // sorted deterministically for stable CSV/report generation.
+    [[nodiscard]] std::vector<CacheAdmissionRecord>
+    cache_admission_diagnostics() const;
 
 private:
     // Dispatches the given event to the appropriate node (compute or memory) based on the event's target ID.

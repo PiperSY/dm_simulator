@@ -1,33 +1,36 @@
 experiment:
-  name: phase8_lru
-  output_dir: results/phase8_lru
+  name: phase_c_probe_hotness_only
+  output_dir: results/phase_c_probe_hotness_only
 
 memory:
   node_id: 99
   base_latency: 25
-  bandwidth_bytes_per_time: 16
+  bandwidth_bytes_per_time: 4
 
 link:
   one_way_latency: 6
 
 local_cache:
-  capacity_bytes: 256
+  capacity_bytes: 1024
   hit_latency: 1
-  policy: lru
+  policy: hotness_only
+  hotness:
+    min_admit_count: 2
+    reset_on_epoch_change: false
 
 workload:
   seed: 8888
   compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8]
   object_count: 256
   object_size_bytes: 64
-  hot_set_churn_fraction: 0
-  object_size_mode: bimodal
+  hot_set_churn_fraction: 0.4
+  object_size_mode: fixed
   object_size_small_bytes: 64
   object_size_large_bytes: 256
   large_object_probability: 0.2
-  requests_per_node_per_epoch: 256
+  requests_per_node_per_epoch: 16
   epoch_count: 8
-  hot_set_size: 8
+  hot_set_size: 32
   hot_access_probability: 0.8
   hot_set_mode: epoch_shift
   cross_node_overlap: high
