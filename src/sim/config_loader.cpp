@@ -101,6 +101,28 @@ double optional_nonnegative_double(const YAML::Node& node,
     return value;
 }
 
+ContentionPolicyVariant parse_contention_policy_variant(
+    const std::string& value) {
+    // Variant strings are intentionally separate from local_cache.policy so
+    // existing contention_aware configs keep their Phase 8 behavior.
+    if (value == "v1") {
+        return ContentionPolicyVariant::V1;
+    }
+    if (value == "smoothed") {
+        return ContentionPolicyVariant::Smoothed;
+    }
+    if (value == "reuse_gated") {
+        return ContentionPolicyVariant::ReuseGated;
+    }
+    if (value == "hysteresis") {
+        return ContentionPolicyVariant::Hysteresis;
+    }
+
+    throw std::invalid_argument(
+        "Invalid local_cache.contention.variant: expected v1, smoothed, "
+        "reuse_gated, or hysteresis");
+}
+
 ContentionPolicyConfig parse_contention_policy_config(
     const YAML::Node& local_cache_node) {
     ContentionPolicyConfig config;
@@ -108,6 +130,11 @@ ContentionPolicyConfig parse_contention_policy_config(
     const YAML::Node contention_node = local_cache_node["contention"];
     if (!contention_node) {
         return config;
+    }
+
+    if (const YAML::Node variant = contention_node["variant"]) {
+        config.variant =
+            parse_contention_policy_variant(variant.as<std::string>());
     }
 
     config.weights.local_hotness_weight = optional_nonnegative_double(
@@ -160,6 +187,36 @@ ContentionPolicyConfig parse_contention_policy_config(
             contention_node["reset_on_epoch_change"]) {
         config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
     }
+
+    if (const YAML::Node history_epochs =
+            contention_node["telemetry_history_epochs"]) {
+        config.telemetry_history_epochs = history_epochs.as<std::uint64_t>();
+        if (config.telemetry_history_epochs == 0) {
+            throw std::invalid_argument(
+                "Invalid local_cache.contention.telemetry_history_epochs: "
+                "expected a positive integer");
+        }
+    }
+
+    config.telemetry_decay = optional_nonnegative_double(
+        contention_node,
+        "telemetry_decay",
+        "local_cache.contention",
+        config.telemetry_decay);
+    if (const YAML::Node reuse_gate =
+            contention_node["local_reuse_gate_threshold"]) {
+        config.local_reuse_gate_threshold = reuse_gate.as<std::uint64_t>();
+        if (config.local_reuse_gate_threshold == 0) {
+            throw std::invalid_argument(
+                "Invalid local_cache.contention.local_reuse_gate_threshold: "
+                "expected a positive integer");
+        }
+    }
+    config.eviction_score_margin = optional_nonnegative_double(
+        contention_node,
+        "eviction_score_margin",
+        "local_cache.contention",
+        config.eviction_score_margin);
 
     return config;
 }

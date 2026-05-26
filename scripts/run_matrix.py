@@ -20,12 +20,33 @@ from pathlib import Path
 from typing import Any
 
 
-POLICIES = (
+BASE_POLICIES = (
     "always_remote",
     "lru",
     "hotness_only",
     "global_hottest_replication",
     "contention_aware",
+)
+
+CONTENTION_VARIANT_POLICIES = (
+    "contention_aware_v1",
+    "contention_aware_smoothed",
+    "contention_aware_reuse_gated",
+    "contention_aware_hysteresis",
+)
+
+PHASE_E_DEFAULT_POLICIES = (
+    "lru",
+    "hotness_only",
+    "hotness_only_cumulative",
+    "global_hottest_replication",
+    *CONTENTION_VARIANT_POLICIES,
+)
+
+POLICIES = (
+    *BASE_POLICIES,
+    "hotness_only_cumulative",
+    *CONTENTION_VARIANT_POLICIES,
 )
 
 # Named bandwidth levels map to simulator units in write_yaml_config().
@@ -62,6 +83,9 @@ AGGREGATE_COLUMNS = (
     "hot_set_churn_label",
     "hot_set_churn_fraction",
     "cross_node_overlap",
+    "object_count",
+    "hot_set_size",
+    "hot_access_probability",
     "object_size_mode",
     "object_size_bytes",
     "object_size_small_bytes",
@@ -124,7 +148,7 @@ class MatrixPreset:
         compute_node_ids: Maximum ordered pool of compute-node IDs available to
             this preset. A run with N nodes uses the first N IDs.
         compute_node_count_values: Default node-count sweep values.
-        object_count: Size of the synthetic object universe.
+        object_count_values: Object-universe size sweep values.
         object_size_bytes: Fixed object size and representative size used for
             cache-capacity calculations.
         object_size_small_bytes: Small-object size for bimodal workloads.
@@ -139,10 +163,10 @@ class MatrixPreset:
         link_latency_levels: Named one-way link-latency sweep values.
         requests_per_node_per_epoch_values: Epoch-length sweep, measured as
             requests issued by each compute node per epoch.
-        epoch_count: Number of synthetic workload epochs.
-        hot_set_size: Number of hot objects per node per epoch.
-        hot_access_probability: Probability that a generated request targets
-            that node's current hot set.
+        epoch_count_values: Synthetic workload epoch-count sweep values.
+        hot_set_size_values: Hot objects per node per epoch sweep values.
+        hot_access_probabilities: Probability sweep for targeting a node's
+            current hot set.
         hot_set_mode: Workload hot-set mode, usually "static" or
             "epoch_shift".
         hot_set_churn_fractions: Fraction of hot objects replaced at epoch
@@ -158,7 +182,7 @@ class MatrixPreset:
     cache_hit_latency: int
     compute_node_ids: tuple[int, ...]
     compute_node_count_values: tuple[int, ...]
-    object_count: int
+    object_count_values: tuple[int, ...]
     object_size_bytes: int
     object_size_small_bytes: int
     object_size_large_bytes: int
@@ -168,9 +192,9 @@ class MatrixPreset:
     memory_base_latency_levels: tuple[str, ...]
     link_latency_levels: tuple[str, ...]
     requests_per_node_per_epoch_values: tuple[int, ...]
-    epoch_count: int
-    hot_set_size: int
-    hot_access_probability: float
+    epoch_count_values: tuple[int, ...]
+    hot_set_size_values: tuple[int, ...]
+    hot_access_probabilities: tuple[float, ...]
     hot_set_mode: str
     hot_set_churn_fractions: tuple[float, ...]
     cross_node_overlaps: tuple[str, ...]
@@ -186,7 +210,12 @@ class MatrixRun:
         policy: Cache policy name written to local_cache.policy.
         seed: Synthetic workload RNG seed.
         compute_node_count: Number of compute nodes active in this run.
+        object_count: Size of the synthetic object universe.
+        epoch_count: Number of synthetic workload epochs.
         requests_per_node_per_epoch: Workload epoch length for each node.
+        hot_set_size: Number of hot objects per node per epoch.
+        hot_access_probability: Probability that a generated request targets
+            that node's current hot set.
         hot_set_churn_fraction: Fraction of hot-set entries replaced per epoch.
         cross_node_overlap: Hot-set overlap level: "low", "medium", or "high".
         object_size_mode: Object-size generation mode: "fixed" or "bimodal".
@@ -204,7 +233,11 @@ class MatrixRun:
     policy: str
     seed: int
     compute_node_count: int
+    object_count: int
+    epoch_count: int
     requests_per_node_per_epoch: int
+    hot_set_size: int
+    hot_access_probability: float
     hot_set_churn_fraction: float
     cross_node_overlap: str
     object_size_mode: str
@@ -225,7 +258,7 @@ PRESETS = {
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4),
         compute_node_count_values=(4,),
-        object_count=128,
+        object_count_values=(128,),
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
@@ -235,9 +268,9 @@ PRESETS = {
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(16,),
-        epoch_count=3,
-        hot_set_size=8,
-        hot_access_probability=0.8,
+        epoch_count_values=(3,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
         hot_set_churn_fractions=(1.0,),
         cross_node_overlaps=("medium",),
@@ -250,7 +283,7 @@ PRESETS = {
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4, 5, 6, 7, 8),
         compute_node_count_values=(8,),
-        object_count=128,
+        object_count_values=(128,),
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
@@ -260,9 +293,9 @@ PRESETS = {
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(512,),
-        epoch_count=10,
-        hot_set_size=8,
-        hot_access_probability=0.8,
+        epoch_count_values=(10,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
         hot_set_churn_fractions=(1.0,),
         cross_node_overlaps=("medium",),
@@ -275,7 +308,7 @@ PRESETS = {
         cache_hit_latency=1,
         compute_node_ids=(1, 2, 3, 4, 5, 6, 7, 8),
         compute_node_count_values=(8,),
-        object_count=256,
+        object_count_values=(256,),
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
@@ -285,9 +318,9 @@ PRESETS = {
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(16, 64, 256, 1024),
-        epoch_count=8,
-        hot_set_size=8,
-        hot_access_probability=0.8,
+        epoch_count_values=(8,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
         hot_set_churn_fractions=(0.0, 0.25, 0.5, 0.75, 1.0),
         cross_node_overlaps=("low", "medium", "high"),
@@ -300,7 +333,7 @@ PRESETS = {
         cache_hit_latency=1,
         compute_node_ids=tuple(range(1, 17)),
         compute_node_count_values=(4, 8),
-        object_count=256,
+        object_count_values=(256,),
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
@@ -310,11 +343,38 @@ PRESETS = {
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(256,),
-        epoch_count=8,
-        hot_set_size=8,
-        hot_access_probability=0.8,
+        epoch_count_values=(8,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
         hot_set_churn_fractions=(0.5,),
+        cross_node_overlaps=("medium",),
+        object_size_modes=("fixed",),
+    ),
+    # Phase E keeps architecture/workload fixed enough to compare policy
+    # variants, while still probing temporal stability through epoch length
+    # and partial hot-set churn.
+    "phase_e": MatrixPreset(
+        name="phase_e",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probability=0.2,
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(16, 64),
+        epoch_count_values=(8,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.25, 0.5),
         cross_node_overlaps=("medium",),
         object_size_modes=("fixed",),
     ),
@@ -332,6 +392,10 @@ def parse_args() -> argparse.Namespace:
         --seeds: Comma-separated workload seeds.
         --policies: Comma-separated cache policy names to compare.
         --node-counts: Comma-separated compute-node counts.
+        --object-counts: Comma-separated object-universe sizes.
+        --hot-set-sizes: Comma-separated hot-set sizes.
+        --hot-access-probabilities: Comma-separated hot-access probabilities.
+        --epoch-counts: Comma-separated epoch counts.
         --cache-hotset-multipliers: Comma-separated cache capacity multipliers.
         --memory-bandwidth-levels: Comma-separated named bandwidth levels.
         --memory-base-latency-levels: Comma-separated named base latencies.
@@ -372,13 +436,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--policies",
-        default=",".join(POLICIES),
-        help="Comma-separated policy list.",
+        default=None,
+        help=(
+            "Comma-separated policy list. Defaults to the base policies, "
+            "except phase_e which uses the Phase E variant comparison set."
+        ),
     )
     parser.add_argument(
         "--node-counts",
         default=None,
         help="Comma-separated compute-node counts overriding the preset.",
+    )
+    parser.add_argument(
+        "--object-counts",
+        default=None,
+        help="Comma-separated synthetic object counts overriding the preset.",
+    )
+    parser.add_argument(
+        "--hot-set-sizes",
+        default=None,
+        help="Comma-separated hot-set sizes overriding the preset.",
+    )
+    parser.add_argument(
+        "--hot-access-probabilities",
+        default=None,
+        help="Comma-separated hot-access probabilities in [0, 1].",
+    )
+    parser.add_argument(
+        "--epoch-counts",
+        default=None,
+        help="Comma-separated epoch counts overriding the preset.",
     )
     parser.add_argument(
         "--cache-hotset-multipliers",
@@ -628,7 +715,7 @@ def cache_capacity_bytes(run: MatrixRun) -> int:
     """Compute cache capacity from hot-set size and multiplier."""
 
     representative_object_size = run.preset.object_size_bytes
-    hot_set_bytes = run.preset.hot_set_size * representative_object_size
+    hot_set_bytes = run.hot_set_size * representative_object_size
     return max(
         1,
         int(round(hot_set_bytes * run.cache_capacity_hotset_multiplier)),
@@ -639,7 +726,11 @@ def run_slug(preset: MatrixPreset,
              policy: str,
              seed: int,
              compute_node_count: int,
+             object_count: int,
+             epoch_count: int,
              epoch_length: int,
+             hot_set_size: int,
+             hot_access_probability: float,
              churn_fraction: float,
              overlap: str,
              object_size_mode: str,
@@ -654,8 +745,11 @@ def run_slug(preset: MatrixPreset,
         f"__policy-{policy}"
         f"__seed-{seed}"
         f"__nodes-{compute_node_count}"
-        f"__epochs-{preset.epoch_count}"
+        f"__objects-{object_count}"
+        f"__epochs-{epoch_count}"
         f"__rpe-{epoch_length}"
+        f"__hotset-{hot_set_size}"
+        f"__hotp-{slug_float(hot_access_probability)}"
         f"__mode-{preset.hot_set_mode}"
         f"__churn-{slug_float(churn_fraction)}"
         f"__overlap-{overlap}"
@@ -672,7 +766,11 @@ def build_runs(
     policies: list[str],
     seeds: list[int],
     node_counts: list[int],
+    object_counts: list[int],
+    epoch_counts: list[int],
     epoch_lengths: list[int],
+    hot_set_sizes: list[int],
+    hot_access_probabilities: list[float],
     churn_fractions: list[float],
     overlaps: list[str],
     object_size_modes: list[str],
@@ -693,47 +791,59 @@ def build_runs(
     for seed in seeds:
         for policy in policies:
             for node_count in node_counts:
-                for epoch_length in epoch_lengths:
-                    for churn_fraction in churn_fractions:
-                        for overlap in overlaps:
-                            for object_size_mode in object_size_modes:
-                                for cache_multiplier in cache_multipliers:
-                                    for bandwidth_level in memory_bandwidth_levels:
-                                        for base_level in memory_base_latency_levels:
-                                            for link_level in link_latency_levels:
-                                                name = run_slug(
-                                                    preset,
-                                                    policy,
-                                                    seed,
-                                                    node_count,
-                                                    epoch_length,
-                                                    churn_fraction,
-                                                    overlap,
-                                                    object_size_mode,
-                                                    cache_multiplier,
-                                                    bandwidth_level,
-                                                    base_level,
-                                                    link_level,
-                                                )
-                                                runs.append(
-                                                    MatrixRun(
-                                                        preset=preset,
-                                                        policy=policy,
-                                                        seed=seed,
-                                                        compute_node_count=node_count,
-                                                        requests_per_node_per_epoch=epoch_length,
-                                                        hot_set_churn_fraction=churn_fraction,
-                                                        cross_node_overlap=overlap,
-                                                        object_size_mode=object_size_mode,
-                                                        cache_capacity_hotset_multiplier=cache_multiplier,
-                                                        memory_bandwidth_level=bandwidth_level,
-                                                        memory_base_latency_level=base_level,
-                                                        link_latency_level=link_level,
-                                                        run_name=name,
-                                                        config_path=config_dir / f"{name}.yaml",
-                                                        output_dir=output_root / name,
-                                                    )
-                                                )
+                for object_count in object_counts:
+                    for epoch_count in epoch_counts:
+                        for epoch_length in epoch_lengths:
+                            for hot_set_size in hot_set_sizes:
+                                for hot_access_probability in hot_access_probabilities:
+                                    for churn_fraction in churn_fractions:
+                                        for overlap in overlaps:
+                                            for object_size_mode in object_size_modes:
+                                                for cache_multiplier in cache_multipliers:
+                                                    for bandwidth_level in memory_bandwidth_levels:
+                                                        for base_level in memory_base_latency_levels:
+                                                            for link_level in link_latency_levels:
+                                                                name = run_slug(
+                                                                    preset,
+                                                                    policy,
+                                                                    seed,
+                                                                    node_count,
+                                                                    object_count,
+                                                                    epoch_count,
+                                                                    epoch_length,
+                                                                    hot_set_size,
+                                                                    hot_access_probability,
+                                                                    churn_fraction,
+                                                                    overlap,
+                                                                    object_size_mode,
+                                                                    cache_multiplier,
+                                                                    bandwidth_level,
+                                                                    base_level,
+                                                                    link_level,
+                                                                )
+                                                                runs.append(
+                                                                    MatrixRun(
+                                                                        preset=preset,
+                                                                        policy=policy,
+                                                                        seed=seed,
+                                                                        compute_node_count=node_count,
+                                                                        object_count=object_count,
+                                                                        epoch_count=epoch_count,
+                                                                        requests_per_node_per_epoch=epoch_length,
+                                                                        hot_set_size=hot_set_size,
+                                                                        hot_access_probability=hot_access_probability,
+                                                                        hot_set_churn_fraction=churn_fraction,
+                                                                        cross_node_overlap=overlap,
+                                                                        object_size_mode=object_size_mode,
+                                                                        cache_capacity_hotset_multiplier=cache_multiplier,
+                                                                        memory_bandwidth_level=bandwidth_level,
+                                                                        memory_base_latency_level=base_level,
+                                                                        link_latency_level=link_level,
+                                                                        run_name=name,
+                                                                        config_path=config_dir / f"{name}.yaml",
+                                                                        output_dir=output_root / name,
+                                                                    )
+                                                                )
     return runs
 
 
@@ -750,12 +860,44 @@ def yaml_bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def yaml_policy_name(policy: str) -> str:
+    """Translate a matrix policy label into the simulator's YAML policy name."""
+
+    if policy == "hotness_only_cumulative":
+        return "hotness_only"
+    if policy.startswith("contention_aware_"):
+        return "contention_aware"
+    return policy
+
+
+def contention_variant_for_policy(policy: str) -> str | None:
+    """Return the contention variant encoded by a matrix policy label."""
+
+    # Plain contention_aware intentionally remains the legacy v1 baseline.
+    variants = {
+        "contention_aware": "v1",
+        "contention_aware_v1": "v1",
+        "contention_aware_smoothed": "smoothed",
+        "contention_aware_reuse_gated": "reuse_gated",
+        "contention_aware_hysteresis": "hysteresis",
+    }
+    return variants.get(policy)
+
+
+def hotness_reset_on_epoch_change(policy: str) -> bool:
+    """Return whether the generated hotness policy should reset per epoch."""
+
+    return policy != "hotness_only_cumulative"
+
+
 def write_yaml_config(run: MatrixRun) -> None:
     """Write the simulator YAML config for one matrix run."""
 
     preset = run.preset
     run.config_path.parent.mkdir(parents=True, exist_ok=True)
     node_ids = ", ".join(str(node_id) for node_id in node_ids_for_run(run))
+    yaml_policy = yaml_policy_name(run.policy)
+    contention_variant = contention_variant_for_policy(run.policy)
 
     lines = [
         "experiment:",
@@ -773,23 +915,27 @@ def write_yaml_config(run: MatrixRun) -> None:
         "local_cache:",
         f"  capacity_bytes: {cache_capacity_bytes(run)}",
         f"  hit_latency: {preset.cache_hit_latency}",
-        f"  policy: {run.policy}",
+        f"  policy: {yaml_policy}",
     ]
 
     # Most policies need only the shared local_cache fields. These blocks add
     # policy-specific knobs while keeping the workload/architecture matched.
-    if run.policy == "hotness_only":
+    if yaml_policy == "hotness_only":
         lines.extend(
             [
                 "  hotness:",
                 "    min_admit_count: 2",
-                f"    reset_on_epoch_change: {yaml_bool(True)}",
+                "    # Phase E uses hotness_only_cumulative to test whether",
+                "    # carrying local demand across epochs is a stronger baseline.",
+                "    reset_on_epoch_change: "
+                f"{yaml_bool(hotness_reset_on_epoch_change(run.policy))}",
             ]
         )
-    elif run.policy == "contention_aware":
+    elif yaml_policy == "contention_aware":
         lines.extend(
             [
                 "  contention:",
+                f"    variant: {contention_variant}",
                 "    local_hotness_weight: 1.0",
                 "    remote_access_weight: 1.0",
                 "    distinct_requester_weight: 1.5",
@@ -798,9 +944,34 @@ def write_yaml_config(run: MatrixRun) -> None:
                 "    size_penalty_weight: 0.5",
                 "    min_admit_score: 1.0",
                 "    local_hotness_threshold: 2",
-                f"    reset_on_epoch_change: {yaml_bool(True)}",
+                f"    reset_on_epoch_change: {yaml_bool(False)}",
             ]
         )
+        if contention_variant == "smoothed":
+            lines.extend(
+                [
+                    "    # Smoothed telemetry blends the last few prior epochs",
+                    "    # so one unlucky epoch does not dominate admissions.",
+                    "    telemetry_history_epochs: 3",
+                    "    telemetry_decay: 0.5",
+                ]
+            )
+        elif contention_variant == "reuse_gated":
+            lines.extend(
+                [
+                    "    # Reuse gating requires local evidence before a",
+                    "    # globally contended object can occupy a private cache.",
+                    "    local_reuse_gate_threshold: 2",
+                ]
+            )
+        elif contention_variant == "hysteresis":
+            lines.extend(
+                [
+                    "    # Hysteresis avoids evicting a resident for a nearly",
+                    "    # equal-scored incoming object.",
+                    "    eviction_score_margin: 0.25",
+                ]
+            )
 
     lines.extend(
         [
@@ -808,7 +979,7 @@ def write_yaml_config(run: MatrixRun) -> None:
             "workload:",
             f"  seed: {run.seed}",
             f"  compute_node_ids: [{node_ids}]",
-            f"  object_count: {preset.object_count}",
+            f"  object_count: {run.object_count}",
             f"  object_size_bytes: {preset.object_size_bytes}",
             f"  hot_set_churn_fraction: {run.hot_set_churn_fraction:g}",
             f"  object_size_mode: {run.object_size_mode}",
@@ -816,9 +987,9 @@ def write_yaml_config(run: MatrixRun) -> None:
             f"  object_size_large_bytes: {preset.object_size_large_bytes}",
             f"  large_object_probability: {preset.large_object_probability:g}",
             f"  requests_per_node_per_epoch: {run.requests_per_node_per_epoch}",
-            f"  epoch_count: {preset.epoch_count}",
-            f"  hot_set_size: {preset.hot_set_size}",
-            f"  hot_access_probability: {preset.hot_access_probability}",
+            f"  epoch_count: {run.epoch_count}",
+            f"  hot_set_size: {run.hot_set_size}",
+            f"  hot_access_probability: {run.hot_access_probability:g}",
             f"  hot_set_mode: {preset.hot_set_mode}",
             f"  cross_node_overlap: {run.cross_node_overlap}",
             "",
@@ -841,7 +1012,7 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "seed": run.seed,
         "node_count": run.compute_node_count,
         "compute_node_count": run.compute_node_count,
-        "epoch_count": preset.epoch_count,
+        "epoch_count": run.epoch_count,
         "requests_per_node_per_epoch": run.requests_per_node_per_epoch,
         "hot_set_mode": preset.hot_set_mode,
         "hot_set_churn_label": hot_set_churn_label(
@@ -850,6 +1021,9 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         ),
         "hot_set_churn_fraction": run.hot_set_churn_fraction,
         "cross_node_overlap": run.cross_node_overlap,
+        "object_count": run.object_count,
+        "hot_set_size": run.hot_set_size,
+        "hot_access_probability": run.hot_access_probability,
         "object_size_mode": run.object_size_mode,
         "object_size_bytes": preset.object_size_bytes,
         "object_size_small_bytes": preset.object_size_small_bytes,
@@ -1076,6 +1250,10 @@ def verify_dry_run(
             f"bandwidth_bytes_per_time: {memory_bandwidth_bytes_per_time(run)}",
             f"one_way_latency: {one_way_link_latency(run)}",
             f"capacity_bytes: {cache_capacity_bytes(run)}",
+            f"object_count: {run.object_count}",
+            f"epoch_count: {run.epoch_count}",
+            f"hot_set_size: {run.hot_set_size}",
+            f"hot_access_probability: {run.hot_access_probability:g}",
             "hot_set_churn_fraction:",
             "object_size_mode:",
             "object_size_small_bytes:",
@@ -1087,6 +1265,30 @@ def verify_dry_run(
                 raise RuntimeError(
                     f"Dry run config {run.config_path} is missing {field}"
                 )
+
+        yaml_policy = yaml_policy_name(run.policy)
+        if f"policy: {yaml_policy}" not in config_text:
+            raise RuntimeError(
+                f"Dry run config {run.config_path} has wrong YAML policy"
+            )
+
+        variant = contention_variant_for_policy(run.policy)
+        if variant is not None:
+            # Variant labels are experiment-facing aliases; generated YAML must
+            # keep the simulator policy stable and make the variant explicit.
+            for field in ("policy: contention_aware", f"variant: {variant}"):
+                if field not in config_text:
+                    raise RuntimeError(
+                        f"Dry run config {run.config_path} is missing {field}"
+                    )
+
+        if run.policy == "hotness_only_cumulative":
+            for field in ("policy: hotness_only",
+                          "reset_on_epoch_change: false"):
+                if field not in config_text:
+                    raise RuntimeError(
+                        f"Dry run config {run.config_path} is missing {field}"
+                    )
 
     with aggregate_path.open("r", encoding="utf-8", newline="") as input_file:
         reader = csv.reader(input_file)
@@ -1106,7 +1308,16 @@ def main() -> int:
     args = parse_args()
     preset = PRESETS[args.preset]
     seeds = parse_seeds(args.seeds)
-    policies = parse_policies(args.policies)
+    default_policies = (
+        PHASE_E_DEFAULT_POLICIES
+        if preset.name == "phase_e"
+        else BASE_POLICIES
+    )
+    policies = (
+        parse_policies(args.policies)
+        if args.policies is not None
+        else list(default_policies)
+    )
     node_counts = (
         parse_positive_ints(args.node_counts)
         if args.node_counts is not None
@@ -1116,6 +1327,27 @@ def main() -> int:
         parse_positive_ints(args.epoch_lengths)
         if args.epoch_lengths is not None
         else list(preset.requests_per_node_per_epoch_values)
+    )
+    object_counts = (
+        parse_positive_ints(args.object_counts)
+        if args.object_counts is not None
+        else list(preset.object_count_values)
+    )
+    epoch_counts = (
+        parse_positive_ints(args.epoch_counts)
+        if args.epoch_counts is not None
+        else list(preset.epoch_count_values)
+    )
+    hot_set_sizes = (
+        parse_positive_ints(args.hot_set_sizes)
+        if args.hot_set_sizes is not None
+        else list(preset.hot_set_size_values)
+    )
+    hot_access_probabilities = (
+        parse_probabilities(args.hot_access_probabilities,
+                            "hot-access probability")
+        if args.hot_access_probabilities is not None
+        else list(preset.hot_access_probabilities)
     )
     churn_fractions = (
         parse_probabilities(args.churn_fractions, "churn fraction")
@@ -1181,7 +1413,11 @@ def main() -> int:
                       policies,
                       seeds,
                       node_counts,
+                      object_counts,
+                      epoch_counts,
                       epoch_lengths,
+                      hot_set_sizes,
+                      hot_access_probabilities,
                       churn_fractions,
                       overlaps,
                       object_size_modes,

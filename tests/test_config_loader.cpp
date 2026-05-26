@@ -10,6 +10,7 @@
 namespace {
 
 using dm_sim::CrossNodeOverlap;
+using dm_sim::ContentionPolicyVariant;
 using dm_sim::ExperimentConfig;
 using dm_sim::HotSetMode;
 using dm_sim::LocalCachePolicyType;
@@ -183,6 +184,7 @@ void test_phase8_contention_policy_config_parses() {
                    std::string("policy: lru").size(),
                    "policy: contention_aware\n"
                    "  contention:\n"
+                   "    variant: smoothed\n"
                    "    local_hotness_weight: 1.2\n"
                    "    remote_access_weight: 1.3\n"
                    "    distinct_requester_weight: 1.4\n"
@@ -191,7 +193,11 @@ void test_phase8_contention_policy_config_parses() {
                    "    size_penalty_weight: 0.7\n"
                    "    min_admit_score: 1.8\n"
                    "    local_hotness_threshold: 3\n"
-                   "    reset_on_epoch_change: false");
+                   "    reset_on_epoch_change: false\n"
+                   "    telemetry_history_epochs: 3\n"
+                   "    telemetry_decay: 0.5\n"
+                   "    local_reuse_gate_threshold: 4\n"
+                   "    eviction_score_margin: 0.25");
 
     const std::filesystem::path path =
         write_temp_config("dm_sim_contention_config.yaml", config);
@@ -200,6 +206,7 @@ void test_phase8_contention_policy_config_parses() {
 
     const auto& local_cache = experiment.simulation.local_cache;
     assert(local_cache.policy_type == LocalCachePolicyType::ContentionAware);
+    assert(local_cache.contention.variant == ContentionPolicyVariant::Smoothed);
     assert(local_cache.contention.weights.local_hotness_weight == 1.2);
     assert(local_cache.contention.weights.remote_access_weight == 1.3);
     assert(local_cache.contention.weights.distinct_requester_weight == 1.4);
@@ -209,6 +216,29 @@ void test_phase8_contention_policy_config_parses() {
     assert(local_cache.contention.min_admit_score == 1.8);
     assert(local_cache.contention.local_hotness_threshold == 3);
     assert(!local_cache.contention.reset_on_epoch_change);
+    assert(local_cache.contention.telemetry_history_epochs == 3);
+    assert(local_cache.contention.telemetry_decay == 0.5);
+    assert(local_cache.contention.local_reuse_gate_threshold == 4);
+    assert(local_cache.contention.eviction_score_margin == 0.25);
+}
+
+void test_phase_e_contention_variant_defaults_to_v1() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: contention_aware");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_contention_default_variant.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+
+    const auto& contention = experiment.simulation.local_cache.contention;
+    assert(contention.variant == ContentionPolicyVariant::V1);
+    assert(contention.telemetry_history_epochs == 1);
+    assert(contention.telemetry_decay == 1.0);
+    assert(contention.local_reuse_gate_threshold == 2);
+    assert(contention.eviction_score_margin == 0.0);
 }
 
 void test_invalid_contention_policy_config_fails() {
@@ -228,6 +258,89 @@ void test_invalid_contention_policy_config_fails() {
         const std::string message = error.what();
         assert(message.find("local_cache.contention.queue_wait_weight") !=
                std::string::npos);
+    }
+}
+
+void test_invalid_phase_e_contention_variant_fields_fail() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    variant: clairvoyant");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_contention_variant.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.contention.variant") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    telemetry_history_epochs: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_contention_history.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.contention.telemetry_history_epochs") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    eviction_score_margin: -0.1");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_contention_margin.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.contention.eviction_score_margin") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    local_reuse_gate_threshold: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_contention_reuse_gate.yaml",
+                              config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.contention.local_reuse_gate_threshold") !=
+                   std::string::npos);
+        }
     }
 }
 
@@ -351,7 +464,9 @@ int main() {
     test_enum_strings_parse();
     test_phase6_policy_strings_parse();
     test_phase8_contention_policy_config_parses();
+    test_phase_e_contention_variant_defaults_to_v1();
     test_invalid_contention_policy_config_fails();
+    test_invalid_phase_e_contention_variant_fields_fail();
     test_invalid_phase_b_workload_fields_fail();
     test_missing_required_field_fails();
     test_invalid_enum_value_fails();

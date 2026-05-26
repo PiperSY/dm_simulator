@@ -98,6 +98,8 @@ void write_policy_decision_json(std::ofstream& output,
            << "\"admitted\": " << (decision.admitted ? "true" : "false")
            << ", "
            << "\"reason\": \"" << json_escape(decision.reason) << "\", "
+           << "\"policy_variant\": \""
+           << json_escape(decision.policy_variant) << "\", "
            << "\"total_score\": " << decision.score.total_score << "}";
 }
 
@@ -458,6 +460,7 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
     }
 
     output << "node_id,epoch_id,request_id,object_id,admitted,reason,"
+              "policy_variant,"
               "total_score,local_hotness,remote_accesses,distinct_requesters,"
               "queue_wait,remote_service_time,size_penalty,evicted_objects\n";
     output << std::fixed << std::setprecision(6);
@@ -469,6 +472,7 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
                << decision.object_id << ","
                << (decision.admitted ? "true" : "false") << ","
                << decision.reason << ","
+               << decision.policy_variant << ","
                << decision.score.total_score << ","
                << decision.score.local_hotness << ","
                << decision.score.remote_accesses << ","

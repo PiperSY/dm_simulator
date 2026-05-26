@@ -21,6 +21,7 @@ using dm_sim::CacheReplica;
 using dm_sim::CacheEntry;
 using dm_sim::ContentionAwarePolicy;
 using dm_sim::ContentionPolicyConfig;
+using dm_sim::ContentionPolicyVariant;
 using dm_sim::GlobalHottestReplicationPolicy;
 using dm_sim::HotnessOnlyPolicy;
 using dm_sim::HotnessPolicyConfig;
@@ -80,13 +81,14 @@ void record_remote_object(Stats& stats,
                           ObjectId object_id,
                           std::uint64_t accesses,
                           dm_sim::SimTime queue_wait,
-                          dm_sim::SimTime service_time) {
+                          dm_sim::SimTime service_time,
+                          dm_sim::EpochId epoch_id = 0) {
     for (std::uint64_t i = 0; i < accesses; ++i) {
         const Request request = make_request(
             i + 1,
             object_id,
             8,
-            0,
+            epoch_id,
             static_cast<dm_sim::NodeId>(i + 1));
         stats.record_remote_access(request, static_cast<std::size_t>(i + 1));
         stats.record_object_queue_wait(request, queue_wait);
@@ -308,6 +310,7 @@ void test_contention_policy_uses_local_hotness_for_epoch_zero() {
     assert(diagnostics.size() == 2);
     assert(!diagnostics[0].admitted);
     assert(diagnostics[1].admitted);
+    assert(diagnostics[1].policy_variant == "v1");
     assert(near(diagnostics[0].score.total_score, 0.5));
     assert(near(diagnostics[1].score.total_score, 1.0));
 }
@@ -331,6 +334,86 @@ void test_contention_policy_scores_previous_epoch_contention() {
     assert(near(hot_score.remote_accesses, 1.0));
     assert(near(hot_score.queue_wait, 1.0));
     assert(hot_score.total_score > cold_score.total_score);
+}
+
+void test_contention_policy_smoothed_variant_uses_older_prior_epochs() {
+    Stats stats;
+    record_remote_object(stats, 9401, 4, 0, 0, 0);
+    record_remote_object(stats, 9402, 4, 0, 0, 1);
+
+    ContentionPolicyConfig v1_config = contention_config(0.0);
+    v1_config.weights.remote_access_weight = 1.0;
+    ContentionAwarePolicy v1_policy(v1_config, 64, stats);
+    v1_policy.on_epoch_start(2);
+
+    // V1 sees only epoch 1 here, so object 9401's epoch 0 contention is stale
+    // enough to disappear from the current score.
+    assert(near(v1_policy.score_object(9401, 8).total_score, 0.0));
+    assert(near(v1_policy.score_object(9402, 8).remote_accesses, 1.0));
+
+    ContentionPolicyConfig smoothed_config = contention_config(0.0);
+    smoothed_config.variant = ContentionPolicyVariant::Smoothed;
+    smoothed_config.telemetry_history_epochs = 2;
+    smoothed_config.telemetry_decay = 1.0;
+    smoothed_config.weights.remote_access_weight = 1.0;
+    ContentionAwarePolicy smoothed_policy(smoothed_config, 64, stats);
+    smoothed_policy.on_epoch_start(2);
+
+    assert(near(smoothed_policy.score_object(9401, 8).remote_accesses, 1.0));
+    assert(near(smoothed_policy.score_object(9402, 8).remote_accesses, 1.0));
+}
+
+void test_contention_policy_reuse_gated_variant_requires_local_demand() {
+    Stats stats;
+    record_remote_object(stats, 9411, 4, 0, 0, 0);
+
+    ContentionPolicyConfig config = contention_config(0.5);
+    config.variant = ContentionPolicyVariant::ReuseGated;
+    config.weights.remote_access_weight = 1.0;
+    config.local_reuse_gate_threshold = 2;
+
+    LocalCache cache(
+        16,
+        std::make_unique<ContentionAwarePolicy>(config, 16, stats));
+    const Request request = make_request(1, 9411, 8, 1);
+    const Response response = make_response(1, 9411);
+
+    // The previous epoch says this object is globally valuable, but the first
+    // local miss is not enough evidence to place it in this node's private cache.
+    assert(!cache.lookup(request, 1));
+    assert(!cache.admit(request, response, 2));
+    assert(!cache.contains(9411));
+
+    assert(!cache.lookup(request, 3));
+    assert(cache.admit(request, response, 4));
+    assert(cache.contains(9411));
+}
+
+void test_contention_policy_hysteresis_rejects_borderline_eviction() {
+    Stats stats;
+    record_remote_object(stats, 9421, 3, 0, 0, 0);
+    record_remote_object(stats, 9422, 4, 0, 0, 0);
+
+    std::unordered_map<ObjectId, CacheEntry> entries;
+    entries.emplace(9421, CacheEntry{9421, 8, 1, 1});
+    const Request incoming = make_request(1, 9422, 8, 1);
+
+    ContentionPolicyConfig v1_config = contention_config(0.0);
+    v1_config.weights.remote_access_weight = 1.0;
+    ContentionAwarePolicy v1_policy(v1_config, 16, stats);
+    v1_policy.on_epoch_start(1);
+    assert(v1_policy.select_victim(entries, incoming).has_value());
+
+    ContentionPolicyConfig hysteresis_config = contention_config(0.0);
+    hysteresis_config.variant = ContentionPolicyVariant::Hysteresis;
+    hysteresis_config.weights.remote_access_weight = 1.0;
+    hysteresis_config.eviction_score_margin = 0.3;
+    ContentionAwarePolicy hysteresis_policy(hysteresis_config, 16, stats);
+    hysteresis_policy.on_epoch_start(1);
+
+    // Incoming score is only 0.25 above the resident, so hysteresis keeps the
+    // resident instead of creating admission churn.
+    assert(!hysteresis_policy.select_victim(entries, incoming).has_value());
 }
 
 void test_contention_policy_evicts_lowest_scored_resident() {
@@ -373,6 +456,9 @@ int main() {
     test_global_replica_installation_respects_capacity_and_replaces_entries();
     test_contention_policy_uses_local_hotness_for_epoch_zero();
     test_contention_policy_scores_previous_epoch_contention();
+    test_contention_policy_smoothed_variant_uses_older_prior_epochs();
+    test_contention_policy_reuse_gated_variant_requires_local_demand();
+    test_contention_policy_hysteresis_rejects_borderline_eviction();
     test_contention_policy_evicts_lowest_scored_resident();
     return 0;
 }

@@ -37,11 +37,28 @@ struct ContentionPolicyWeights {
     double size_penalty_weight = 0.5;
 };
 
+enum class ContentionPolicyVariant {
+    // V1 is the original Phase 8 policy and remains the default baseline.
+    V1,
+    // Blends several completed prior epochs instead of using only epoch N-1.
+    Smoothed,
+    // Requires local reuse evidence before admitting a globally contended item.
+    ReuseGated,
+    // Requires an incoming object to beat a resident by a configurable margin.
+    Hysteresis,
+};
+
 struct ContentionPolicyConfig {
     ContentionPolicyWeights weights;
+    ContentionPolicyVariant variant = ContentionPolicyVariant::V1;
     double min_admit_score = 1.0;
     std::uint64_t local_hotness_threshold = 2;
     bool reset_on_epoch_change = true;
+    // Variant knobs are ignored by v1 unless their matching variant is active.
+    std::uint64_t telemetry_history_epochs = 1;
+    double telemetry_decay = 1.0;
+    std::uint64_t local_reuse_gate_threshold = 2;
+    double eviction_score_margin = 0.0;
 };
 
 /*********************************** 

@@ -1,6 +1,7 @@
 #include "cache/contention_policy.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace dm_sim {
 
@@ -17,8 +18,8 @@ void ContentionAwarePolicy::on_lookup(const Request& request,
                                       bool hit) const {
     (void)access_time;
     (void)hit;
-    // The ComputeNode normally announces epoch changes before lookup, but this keepss 
-    // callers from using stale previous-epoch snapshots.
+    // The ComputeNode normally announces epoch changes before lookup, but this
+    // keeps callers from using stale previous-epoch snapshots.
     if (!current_epoch_.has_value() || *current_epoch_ != request.epoch_id) {
         on_epoch_start(request.epoch_id);
     }
@@ -28,13 +29,11 @@ void ContentionAwarePolicy::on_lookup(const Request& request,
 }
 
 void ContentionAwarePolicy::on_epoch_start(EpochId epoch_id) const {
-    // Avoid unnecessary work if the epoch ID is unchanged. This can happen if the ComputeNode fails to announce an epoch change or if multiple lookups occur before the first announcement.
+    // Avoid rebuilding snapshots if multiple lookups arrive within the same epoch.
     if (current_epoch_.has_value() && *current_epoch_ == epoch_id) {
         return;
     }
 
-    // Update current epoch and reset local access counts if configured to do so. 
-    //This ensures that the policy's internal state is correctly aligned with the current epoch and that local hotness calculations reflect only accesses within the current epoch if reset_on_epoch_change is true.
     current_epoch_ = epoch_id;
     if (config_.reset_on_epoch_change) {
         local_access_counts_.clear();
@@ -43,24 +42,28 @@ void ContentionAwarePolicy::on_epoch_start(EpochId epoch_id) const {
     previous_epoch_stats_.clear();
     maxima_ = NormalizationMaxima{};
 
-    // Snapshot once at epoch start. This is the realism boundary for Phase 8:
-    // current-epoch remote misses update Stats, but they cannot affect cache
-    // decisions until the next epoch.
-    for (const ObjectContentionStats& object_stats :
-         stats_.previous_epoch_contention(epoch_id)) {
-        previous_epoch_stats_[object_stats.object_id] = object_stats;
-        // Track per-signal maxima so each raw metric can be converted to a
-        // portable 0..1 value before applying weights.
-        maxima_.remote_accesses =
-            std::max(maxima_.remote_accesses, object_stats.remote_accesses);
-        maxima_.distinct_requesters = std::max(maxima_.distinct_requesters,
-                                               object_stats.distinct_requesters);
-        maxima_.total_queue_wait = std::max(maxima_.total_queue_wait,
-                                            object_stats.total_queue_wait);
-        maxima_.total_remote_service_time =
-            std::max(maxima_.total_remote_service_time,
-                     object_stats.total_remote_service_time);
+    // Snapshot prior telemetry once at epoch start. V1 and most variants use
+    // only epoch N-1. The smoothed variant optionally blends several prior
+    // epochs using decay^age so older data helps only when configured.
+    const std::uint64_t history_epochs =
+        config_.variant == ContentionPolicyVariant::Smoothed
+            ? config_.telemetry_history_epochs
+            : 1;
+    for (std::uint64_t age = 0; age < history_epochs; ++age) {
+        if (epoch_id <= age) {
+            break;
+        }
+
+        const EpochId source_epoch =
+            epoch_id - static_cast<EpochId>(age) - 1;
+        const double weight = std::pow(config_.telemetry_decay,
+                                       static_cast<double>(age));
+        for (const ObjectContentionStats& object_stats :
+             stats_.contention_by_epoch(source_epoch)) {
+            add_contention_snapshot(object_stats, weight);
+        }
     }
+    refresh_normalization_maxima();
 }
 
 void ContentionAwarePolicy::on_access(CacheEntry& entry,
@@ -71,6 +74,13 @@ void ContentionAwarePolicy::on_access(CacheEntry& entry,
 bool ContentionAwarePolicy::should_admit(const Request& request,
                                          const Response& response) const {
     (void)response;
+    // Reuse-gated mode prevents a globally painful object from entering this
+    // node's private cache until this node has shown enough local demand.
+    if (config_.variant == ContentionPolicyVariant::ReuseGated &&
+        count_for(request.object_id) < config_.local_reuse_gate_threshold) {
+        return false;
+    }
+
     return score_object(request.object_id, request.size_bytes).total_score >=
            config_.min_admit_score;
 }
@@ -116,8 +126,14 @@ std::optional<ObjectId> ContentionAwarePolicy::select_victim(
     const ContentionScoreComponents incoming_score =
         score_object(incoming_request.object_id, incoming_request.size_bytes);
     // Avoid churn: replacing a resident is only worthwhile if the incoming
-    // object is strictly better than the weakest object already cached.
-    if (incoming_score.total_score <= victim_score.total_score) {
+    // object is better than the weakest resident. Hysteresis raises that bar
+    // by a configurable margin to avoid borderline admit/evict oscillation.
+    const double required_margin =
+        config_.variant == ContentionPolicyVariant::Hysteresis
+            ? config_.eviction_score_margin
+            : 0.0;
+    if (incoming_score.total_score <=
+        victim_score.total_score + required_margin) {
         return std::nullopt;
     }
 
@@ -144,6 +160,7 @@ void ContentionAwarePolicy::on_admission_result(
     record.object_id = request.object_id;
     record.admitted = admitted;
     record.reason = reason;
+    record.policy_variant = variant_label();
     record.score = score_object(request.object_id, request.size_bytes);
     record.evicted_objects = evicted_objects;
     diagnostics_.push_back(record);
@@ -167,22 +184,19 @@ ContentionScoreComponents ContentionAwarePolicy::score_object(
 
     const auto previous_it = previous_epoch_stats_.find(object_id);
     if (previous_it != previous_epoch_stats_.end()) {
-        const ObjectContentionStats& previous = previous_it->second;
+        const ScoringContentionStats& previous = previous_it->second;
         // These are previous-epoch global-pressure signals. Missing objects
         // keep zeroes, which prevents same-epoch contention from leaking into
         // the current admission decision.
-        score.remote_accesses = normalized(
-            static_cast<double>(previous.remote_accesses),
-            static_cast<double>(maxima_.remote_accesses));
-        score.distinct_requesters = normalized(
-            static_cast<double>(previous.distinct_requesters),
-            static_cast<double>(maxima_.distinct_requesters));
-        score.queue_wait = normalized(
-            static_cast<double>(previous.total_queue_wait),
-            static_cast<double>(maxima_.total_queue_wait));
+        score.remote_accesses =
+            normalized(previous.remote_accesses, maxima_.remote_accesses);
+        score.distinct_requesters = normalized(previous.distinct_requesters,
+                                              maxima_.distinct_requesters);
+        score.queue_wait =
+            normalized(previous.total_queue_wait, maxima_.total_queue_wait);
         score.remote_service_time = normalized(
-            static_cast<double>(previous.total_remote_service_time),
-            static_cast<double>(maxima_.total_remote_service_time));
+            previous.total_remote_service_time,
+            maxima_.total_remote_service_time);
     }
 
     // Penalize objects by the fraction of local cache they would consume. A
@@ -232,6 +246,51 @@ std::uint64_t ContentionAwarePolicy::count_for(ObjectId object_id) const {
     }
 
     return it->second;
+}
+
+void ContentionAwarePolicy::add_contention_snapshot(
+    const ObjectContentionStats& object_stats,
+    double weight) const {
+    ScoringContentionStats& aggregate =
+        previous_epoch_stats_[object_stats.object_id];
+    aggregate.remote_accesses +=
+        static_cast<double>(object_stats.remote_accesses) * weight;
+    aggregate.distinct_requesters +=
+        static_cast<double>(object_stats.distinct_requesters) * weight;
+    aggregate.total_queue_wait +=
+        static_cast<double>(object_stats.total_queue_wait) * weight;
+    aggregate.total_remote_service_time +=
+        static_cast<double>(object_stats.total_remote_service_time) * weight;
+}
+
+void ContentionAwarePolicy::refresh_normalization_maxima() const {
+    for (const auto& entry : previous_epoch_stats_) {
+        const ScoringContentionStats& stats = entry.second;
+        maxima_.remote_accesses =
+            std::max(maxima_.remote_accesses, stats.remote_accesses);
+        maxima_.distinct_requesters =
+            std::max(maxima_.distinct_requesters, stats.distinct_requesters);
+        maxima_.total_queue_wait =
+            std::max(maxima_.total_queue_wait, stats.total_queue_wait);
+        maxima_.total_remote_service_time =
+            std::max(maxima_.total_remote_service_time,
+                     stats.total_remote_service_time);
+    }
+}
+
+std::string ContentionAwarePolicy::variant_label() const {
+    switch (config_.variant) {
+    case ContentionPolicyVariant::V1:
+        return "v1";
+    case ContentionPolicyVariant::Smoothed:
+        return "smoothed";
+    case ContentionPolicyVariant::ReuseGated:
+        return "reuse_gated";
+    case ContentionPolicyVariant::Hysteresis:
+        return "hysteresis";
+    }
+
+    return "unknown";
 }
 
 }  // namespace dm_sim

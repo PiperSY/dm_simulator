@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -57,10 +58,17 @@ private:
     // Normalization maxima for contention features, used to normalize feature values when calculating contention scores. 
     // These maxima are updated based on observed contention metrics to ensure that scores are scaled appropriately.
     struct NormalizationMaxima {
-        std::size_t remote_accesses = 0;
-        std::size_t distinct_requesters = 0;
-        SimTime total_queue_wait = 0;
-        SimTime total_remote_service_time = 0;
+        double remote_accesses = 0.0;
+        double distinct_requesters = 0.0;
+        double total_queue_wait = 0.0;
+        double total_remote_service_time = 0.0;
+    };
+    // Struct to hold the raw components of the contention score for an object, which are calculated based on the observed contention metrics and the configured weights.
+    struct ScoringContentionStats {
+        double remote_accesses = 0.0;
+        double distinct_requesters = 0.0;
+        double total_queue_wait = 0.0;
+        double total_remote_service_time = 0.0;
     };
 
     // Normalizes a given value based on the corresponding maximum value observed for that feature, which helps to scale the contention score components appropriately and 
@@ -68,14 +76,21 @@ private:
     [[nodiscard]] double normalized(double value, double max_value) const;
     // Count of local accesses for the specified object ID, which is used to determine the local hotness component of the contention score. 
     [[nodiscard]] std::uint64_t count_for(ObjectId object_id) const;
+    // Adds a snapshot of contention statistics for a given object to the internal state. Used to track contention metrics across epochs and inform future scoring and decision-making.
+    void add_contention_snapshot(const ObjectContentionStats& object_stats,
+                                 double weight) const;
+    // Updates the normalization maxima based on observed contention metrics, ensuring that the scoring mechanism remains effective and appropriately scaled as contention patterns evolve over time.
+    void refresh_normalization_maxima() const;
+    // Label identifying the active variant of the contention policy. Used in diagnostics and output display.
+    [[nodiscard]] std::string variant_label() const;
 
     ContentionPolicyConfig config_;                                             // Configuration parameters for the contention-aware policy, including weights for different contention features and thresholds for admission decisions.
     std::uint64_t cache_capacity_bytes_ = 0;                                    // The total capacity of the cache in bytes, used to calculate size penalties in the scoring mechanism.
     const Stats& stats_;                                                        // A reference to the Stats object -> access to contention metrics and other statistics needed for scoring and decision-making.
     mutable std::optional<EpochId> current_epoch_;                              // The current epoch ID -> track epoch changes and update internal state.
     mutable std::unordered_map<ObjectId, std::uint64_t> local_access_counts_;   // Local access counts for objects -> used to determine the local hotness component of the contention score.
-    mutable std::unordered_map<ObjectId, ObjectContentionStats>                 
-        previous_epoch_stats_;                                                  // Contention statistics from the previous epoch, used to calculate contention scores for current epoch based on observed metrics.
+    mutable std::unordered_map<ObjectId, ScoringContentionStats>                 
+        previous_epoch_stats_;                                                  // Prior contention telemetry used to calculate scores for the current epoch.
     mutable NormalizationMaxima maxima_;                                        // Normalization maxima instance for contention features.
     mutable std::vector<PolicyDecisionRecord> diagnostics_;                     // Diagnostics records of policy decisions -> used for analysis and debugging.
 };

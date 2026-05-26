@@ -158,6 +158,30 @@ add_test(
 )
 
 add_test(
+    NAME experiment_matrix_sweep_fields_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        quick
+        --policies
+        lru
+        --object-counts
+        64,128
+        --hot-set-sizes
+        4,8
+        --hot-access-probabilities
+        0.6,0.9
+        --epoch-counts
+        2,3
+        --dry-run
+        --expect-runs
+        16
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_sweep_fields_dry_run
+)
+
+add_test(
     NAME experiment_matrix_phase_c_dry_run
     COMMAND
         ${Python3_EXECUTABLE}
@@ -172,3 +196,27 @@ add_test(
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_phase_c_dry_run
 )
+
+add_test(
+    NAME experiment_matrix_phase_e_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        phase_e
+        --dry-run
+        --expect-runs
+        32
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_phase_e_dry_run
+)
+
+add_test(
+    NAME plot_results_smoke
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/tests/test_plot_results.py
+        ${PROJECT_BINARY_DIR}/plot_results_smoke
+)
+
+set_tests_properties(plot_results_smoke PROPERTIES SKIP_RETURN_CODE 77)

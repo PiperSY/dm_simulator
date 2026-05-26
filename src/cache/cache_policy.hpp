@@ -29,6 +29,7 @@ struct PolicyDecisionRecord {
     ObjectId object_id = 0;
     bool admitted = false;
     std::string reason;
+    std::string policy_variant;
     ContentionScoreComponents score;
     std::vector<ObjectId> evicted_objects;
 };
