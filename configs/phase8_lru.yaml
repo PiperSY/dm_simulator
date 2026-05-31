@@ -11,7 +11,7 @@ link:
   one_way_latency: 6
 
 local_cache:
-  capacity_bytes: 256
+  capacity_bytes: 512
   hit_latency: 1
   policy: lru
 
@@ -20,7 +20,7 @@ workload:
   compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8]
   object_count: 256
   object_size_bytes: 64
-  hot_set_churn_fraction: 0
+  hot_set_churn_fraction: 0.4
   object_size_mode: bimodal
   object_size_small_bytes: 64
   object_size_large_bytes: 256
@@ -28,6 +28,6 @@ workload:
   requests_per_node_per_epoch: 256
   epoch_count: 8
   hot_set_size: 8
-  hot_access_probability: 0.8
+  hot_access_probability: 0.6
   hot_set_mode: epoch_shift
-  cross_node_overlap: high
+  cross_node_overlap: medium

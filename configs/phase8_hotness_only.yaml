@@ -11,12 +11,12 @@ link:
   one_way_latency: 6
 
 local_cache:
-  capacity_bytes: 512
+  capacity_bytes: 256
   hit_latency: 1
   policy: hotness_only
   hotness:
     min_admit_count: 2
-    reset_on_epoch_change: true
+    history_mode: cumulative
 
 workload:
   seed: 8888
@@ -29,7 +29,7 @@ workload:
   object_size_large_bytes: 256
   large_object_probability: 0.2
   requests_per_node_per_epoch: 64
-  epoch_count: 8
+  epoch_count: 16
   hot_set_size: 8
   hot_access_probability: 0.6
   hot_set_mode: epoch_shift

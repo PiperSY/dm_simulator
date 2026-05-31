@@ -31,13 +31,17 @@ using dm_sim::Simulator;
 using dm_sim::SimTime;
 using dm_sim::CrossNodeOverlap;
 using dm_sim::HotSetMode;
+using dm_sim::HotnessHistoryMode;
 using dm_sim::SyntheticWorkloadConfig;
 
-HotnessPolicyConfig hotness_config(std::uint64_t min_admit_count = 2,
-                                   bool reset_on_epoch_change = true) {
+HotnessPolicyConfig hotness_config(
+    std::uint64_t min_admit_count = 2,
+    HotnessHistoryMode history_mode = HotnessHistoryMode::Epoch,
+    std::uint64_t history_window_epochs = 4) {
     HotnessPolicyConfig config;
     config.min_admit_count = min_admit_count;
-    config.reset_on_epoch_change = reset_on_epoch_change;
+    config.history_mode = history_mode;
+    config.history_window_epochs = history_window_epochs;
     return config;
 }
 
@@ -447,7 +451,7 @@ void test_repeated_reads_under_hotness_only_hit_after_threshold() {
         8,
         1,
         LocalCachePolicyType::HotnessOnly,
-        hotness_config(2, true),
+        hotness_config(2, HotnessHistoryMode::Epoch),
     };
 
     Simulator simulator(config);
@@ -485,7 +489,7 @@ void test_hotness_only_resets_across_epoch_shift() {
         8,
         1,
         LocalCachePolicyType::HotnessOnly,
-        hotness_config(2, true),
+        hotness_config(2, HotnessHistoryMode::Epoch),
     };
 
     Simulator simulator(config);

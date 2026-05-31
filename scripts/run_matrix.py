@@ -39,6 +39,20 @@ PHASE_E_DEFAULT_POLICIES = (
     "lru",
     "hotness_only",
     "hotness_only_cumulative",
+    "hotness_only_windowed",
+    "global_hottest_replication",
+    *CONTENTION_VARIANT_POLICIES,
+)
+
+EVAL_CONTENTION_CALIBRATION_POLICIES = (
+    "always_remote",
+    "lru",
+)
+
+EVAL_POLICY_VIABILITY_POLICIES = (
+    "lru",
+    "hotness_only_cumulative",
+    "hotness_only_windowed",
     "global_hottest_replication",
     *CONTENTION_VARIANT_POLICIES,
 )
@@ -46,6 +60,7 @@ PHASE_E_DEFAULT_POLICIES = (
 POLICIES = (
     *BASE_POLICIES,
     "hotness_only_cumulative",
+    "hotness_only_windowed",
     *CONTENTION_VARIANT_POLICIES,
 )
 
@@ -351,6 +366,58 @@ PRESETS = {
         cross_node_overlaps=("medium",),
         object_size_modes=("fixed",),
     ),
+    # Final evaluation calibration: isolate the architecture/workload knobs
+    # expected to create remote-memory contention before comparing policies.
+    "eval_contention_calibration": MatrixPreset(
+        name="eval_contention_calibration",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(2, 4, 8, 16),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probability=0.2,
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("mild", "moderate", "severe"),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(256,),
+        epoch_count_values=(8,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.6, 0.8, 0.95),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.5,),
+        cross_node_overlaps=("low", "medium", "high"),
+        object_size_modes=("fixed",),
+    ),
+    # Final evaluation policy matrix: compare practical baselines and
+    # contention-aware variants inside a known high-contention regime.
+    "eval_policy_viability": MatrixPreset(
+        name="eval_policy_viability",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probability=0.2,
+        cache_capacity_hotset_multipliers=(0.25, 0.5, 1.0),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(16, 64, 256),
+        epoch_count_values=(8,),
+        hot_set_size_values=(8,),
+        hot_access_probabilities=(0.6,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.0, 0.25, 0.5, 0.75, 1.0),
+        cross_node_overlaps=("medium",),
+        object_size_modes=("fixed",),
+    ),
     # Phase E keeps architecture/workload fixed enough to compare policy
     # variants, while still probing temporal stability through epoch length
     # and partial hot-set churn.
@@ -439,7 +506,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated policy list. Defaults to the base policies, "
-            "except phase_e which uses the Phase E variant comparison set."
+            "with evaluation presets using their matched comparison sets."
         ),
     )
     parser.add_argument(
@@ -863,7 +930,7 @@ def yaml_bool(value: bool) -> str:
 def yaml_policy_name(policy: str) -> str:
     """Translate a matrix policy label into the simulator's YAML policy name."""
 
-    if policy == "hotness_only_cumulative":
+    if policy in ("hotness_only_cumulative", "hotness_only_windowed"):
         return "hotness_only"
     if policy.startswith("contention_aware_"):
         return "contention_aware"
@@ -884,10 +951,14 @@ def contention_variant_for_policy(policy: str) -> str | None:
     return variants.get(policy)
 
 
-def hotness_reset_on_epoch_change(policy: str) -> bool:
-    """Return whether the generated hotness policy should reset per epoch."""
+def hotness_history_mode(policy: str) -> str:
+    """Return the generated hotness history mode for a matrix policy label."""
 
-    return policy != "hotness_only_cumulative"
+    if policy == "hotness_only_cumulative":
+        return "cumulative"
+    if policy == "hotness_only_windowed":
+        return "windowed"
+    return "epoch"
 
 
 def write_yaml_config(run: MatrixRun) -> None:
@@ -921,16 +992,18 @@ def write_yaml_config(run: MatrixRun) -> None:
     # Most policies need only the shared local_cache fields. These blocks add
     # policy-specific knobs while keeping the workload/architecture matched.
     if yaml_policy == "hotness_only":
+        history_mode = hotness_history_mode(run.policy)
         lines.extend(
             [
                 "  hotness:",
                 "    min_admit_count: 2",
-                "    # Phase E uses hotness_only_cumulative to test whether",
-                "    # carrying local demand across epochs is a stronger baseline.",
-                "    reset_on_epoch_change: "
-                f"{yaml_bool(hotness_reset_on_epoch_change(run.policy))}",
+                "    # Hotness baselines use explicit history modes so bounded",
+                "    # memory can be compared against epoch and cumulative modes.",
+                f"    history_mode: {history_mode}",
             ]
         )
+        if history_mode == "windowed":
+            lines.append("    history_window_epochs: 4")
     elif yaml_policy == "contention_aware":
         lines.extend(
             [
@@ -1282,9 +1355,14 @@ def verify_dry_run(
                         f"Dry run config {run.config_path} is missing {field}"
                     )
 
-        if run.policy == "hotness_only_cumulative":
-            for field in ("policy: hotness_only",
-                          "reset_on_epoch_change: false"):
+        if run.policy in ("hotness_only_cumulative", "hotness_only_windowed"):
+            expected_fields = [
+                "policy: hotness_only",
+                f"history_mode: {hotness_history_mode(run.policy)}",
+            ]
+            if run.policy == "hotness_only_windowed":
+                expected_fields.append("history_window_epochs: 4")
+            for field in expected_fields:
                 if field not in config_text:
                     raise RuntimeError(
                         f"Dry run config {run.config_path} is missing {field}"
@@ -1311,6 +1389,10 @@ def main() -> int:
     default_policies = (
         PHASE_E_DEFAULT_POLICIES
         if preset.name == "phase_e"
+        else EVAL_CONTENTION_CALIBRATION_POLICIES
+        if preset.name == "eval_contention_calibration"
+        else EVAL_POLICY_VIABILITY_POLICIES
+        if preset.name == "eval_policy_viability"
         else BASE_POLICIES
     )
     policies = (

@@ -62,6 +62,22 @@ LocalCachePolicyType parse_local_cache_policy(const std::string& value) {
         "hotness_only, global_hottest_replication, or contention_aware");
 }
 
+HotnessHistoryMode parse_hotness_history_mode(const std::string& value) {
+    if (value == "epoch") {
+        return HotnessHistoryMode::Epoch;
+    }
+    if (value == "cumulative") {
+        return HotnessHistoryMode::Cumulative;
+    }
+    if (value == "windowed") {
+        return HotnessHistoryMode::Windowed;
+    }
+
+    throw std::invalid_argument(
+        "Invalid local_cache.hotness.history_mode: expected epoch, "
+        "cumulative, or windowed");
+}
+
 HotnessPolicyConfig parse_hotness_policy_config(
     const YAML::Node& local_cache_node) {
     HotnessPolicyConfig config;
@@ -75,9 +91,26 @@ HotnessPolicyConfig parse_hotness_policy_config(
         config.min_admit_count = min_admit_count.as<std::uint64_t>();
     }
 
-    if (const YAML::Node reset_on_epoch_change =
-            hotness_node["reset_on_epoch_change"]) {
-        config.reset_on_epoch_change = reset_on_epoch_change.as<bool>();
+    if (hotness_node["reset_on_epoch_change"]) {
+        throw std::invalid_argument(
+            "Deprecated config field local_cache.hotness.reset_on_epoch_change: "
+            "use local_cache.hotness.history_mode instead");
+    }
+
+    if (const YAML::Node history_mode = hotness_node["history_mode"]) {
+        config.history_mode =
+            parse_hotness_history_mode(history_mode.as<std::string>());
+    }
+
+    if (const YAML::Node history_window_epochs =
+            hotness_node["history_window_epochs"]) {
+        config.history_window_epochs =
+            history_window_epochs.as<std::uint64_t>();
+        if (config.history_window_epochs == 0) {
+            throw std::invalid_argument(
+                "Invalid local_cache.hotness.history_window_epochs: "
+                "expected a positive integer");
+        }
     }
 
     return config;

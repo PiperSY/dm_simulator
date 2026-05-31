@@ -13,6 +13,7 @@ using dm_sim::CrossNodeOverlap;
 using dm_sim::ContentionPolicyVariant;
 using dm_sim::ExperimentConfig;
 using dm_sim::HotSetMode;
+using dm_sim::HotnessHistoryMode;
 using dm_sim::LocalCachePolicyType;
 using dm_sim::ObjectSizeMode;
 using dm_sim::SimulationConfig;
@@ -152,7 +153,8 @@ void test_phase6_policy_strings_parse() {
                    "policy: hotness_only\n"
                    "  hotness:\n"
                    "    min_admit_count: 3\n"
-                   "    reset_on_epoch_change: false");
+                   "    history_mode: windowed\n"
+                   "    history_window_epochs: 5");
 
     const std::filesystem::path hotness_path =
         write_temp_config("dm_sim_hotness_config.yaml", config);
@@ -162,7 +164,10 @@ void test_phase6_policy_strings_parse() {
     assert(hotness_experiment.simulation.local_cache.policy_type ==
            LocalCachePolicyType::HotnessOnly);
     assert(hotness_experiment.simulation.local_cache.hotness.min_admit_count == 3);
-    assert(!hotness_experiment.simulation.local_cache.hotness.reset_on_epoch_change);
+    assert(hotness_experiment.simulation.local_cache.hotness.history_mode ==
+           HotnessHistoryMode::Windowed);
+    assert(hotness_experiment.simulation.local_cache.hotness.history_window_epochs ==
+           5);
 
     config = valid_config_text();
     config.replace(config.find("policy: lru"),
@@ -176,6 +181,87 @@ void test_phase6_policy_strings_parse() {
 
     assert(global_experiment.simulation.local_cache.policy_type ==
            LocalCachePolicyType::GlobalHottestReplication);
+}
+
+void test_hotness_history_mode_defaults_and_validation() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: hotness_only\n"
+                       "  hotness:\n"
+                       "    min_admit_count: 2\n"
+                       "    history_mode: cumulative");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_hotness_cumulative_config.yaml", config);
+        const ExperimentConfig experiment =
+            dm_sim::load_experiment_config(path.string());
+
+        const auto& hotness = experiment.simulation.local_cache.hotness;
+        assert(hotness.history_mode == HotnessHistoryMode::Cumulative);
+        assert(hotness.history_window_epochs == 4);
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: hotness_only\n"
+                       "  hotness:\n"
+                       "    history_mode: spiral");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_hotness_mode.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.hotness.history_mode") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: hotness_only\n"
+                       "  hotness:\n"
+                       "    history_mode: windowed\n"
+                       "    history_window_epochs: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_hotness_window.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.hotness.history_window_epochs") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: hotness_only\n"
+                       "  hotness:\n"
+                       "    reset_on_epoch_change: true");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_deprecated_hotness_reset.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.hotness.reset_on_epoch_change") !=
+                   std::string::npos);
+        }
+    }
 }
 
 void test_phase8_contention_policy_config_parses() {
@@ -463,6 +549,7 @@ int main() {
     test_phase_b_workload_fields_parse();
     test_enum_strings_parse();
     test_phase6_policy_strings_parse();
+    test_hotness_history_mode_defaults_and_validation();
     test_phase8_contention_policy_config_parses();
     test_phase_e_contention_variant_defaults_to_v1();
     test_invalid_contention_policy_config_fails();

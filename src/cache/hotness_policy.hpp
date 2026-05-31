@@ -12,7 +12,7 @@ namespace dm_sim {
 /*********************************** 
  * HotnessOnlyPolicy is a cache policy that admits entries into the cache based on their access frequency (hotness). 
  * It maintains access counts for each object and uses a configurable threshold to determine admission. 
- * The policy can also reset access counts on epoch changes if configured to do so.
+ * The policy can track one epoch, all epochs, or a bounded window of recent epochs.
  ***********************************/
 class HotnessOnlyPolicy final : public CachePolicy {
 public:
@@ -36,10 +36,16 @@ public:
 private:
     // Helper method to get the access count for an object, returning 0 if the object has not been accessed before.
     [[nodiscard]] std::uint64_t count_for(ObjectId object_id) const;
-    // Configuration for the hotness policy, including the minimum access count for admission and whether to reset counts on epoch changes.
+    void prune_window(EpochId epoch_id) const;
+    void subtract_epoch_counts(
+        const std::unordered_map<ObjectId, std::uint64_t>& epoch_counts) const;
+    // Configuration for admission threshold and how much demand history is retained.
     HotnessPolicyConfig config_;
-    // Mutable map to track access counts for each object ID, allowing updates even in const methods like on_lookup.
+    // Effective hotness counts after applying the configured history mode.
     mutable std::unordered_map<ObjectId, std::uint64_t> access_counts_;
+    // Windowed mode keeps per-epoch buckets so old demand can be subtracted.
+    mutable std::unordered_map<EpochId, std::unordered_map<ObjectId, std::uint64_t>>
+        epoch_access_counts_;
 };
 
 /*********************************** 

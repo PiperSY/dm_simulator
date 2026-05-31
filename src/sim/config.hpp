@@ -23,9 +23,16 @@ enum class LocalCachePolicyType {
     ContentionAware,
 };
 
+enum class HotnessHistoryMode {
+    Epoch,
+    Cumulative,
+    Windowed,
+};
+
 struct HotnessPolicyConfig {
     std::uint64_t min_admit_count = 2;
-    bool reset_on_epoch_change = true;
+    HotnessHistoryMode history_mode = HotnessHistoryMode::Epoch;
+    std::uint64_t history_window_epochs = 4;
 };
 
 struct ContentionPolicyWeights {

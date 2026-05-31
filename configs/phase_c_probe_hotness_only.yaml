@@ -16,7 +16,7 @@ local_cache:
   policy: hotness_only
   hotness:
     min_admit_count: 2
-    reset_on_epoch_change: false
+    history_mode: cumulative
 
 workload:
   seed: 8888

@@ -23,6 +23,7 @@ using dm_sim::ContentionAwarePolicy;
 using dm_sim::ContentionPolicyConfig;
 using dm_sim::ContentionPolicyVariant;
 using dm_sim::GlobalHottestReplicationPolicy;
+using dm_sim::HotnessHistoryMode;
 using dm_sim::HotnessOnlyPolicy;
 using dm_sim::HotnessPolicyConfig;
 using dm_sim::LocalCache;
@@ -56,11 +57,14 @@ Response make_response(dm_sim::RequestId request_id, ObjectId object_id) {
     return response;
 }
 
-HotnessPolicyConfig hotness_config(std::uint64_t min_admit_count = 2,
-                                   bool reset_on_epoch_change = true) {
+HotnessPolicyConfig hotness_config(
+    std::uint64_t min_admit_count = 2,
+    HotnessHistoryMode history_mode = HotnessHistoryMode::Epoch,
+    std::uint64_t history_window_epochs = 4) {
     HotnessPolicyConfig config;
     config.min_admit_count = min_admit_count;
-    config.reset_on_epoch_change = reset_on_epoch_change;
+    config.history_mode = history_mode;
+    config.history_window_epochs = history_window_epochs;
     return config;
 }
 
@@ -231,7 +235,7 @@ void test_hotness_policy_evicts_coldest_resident() {
     assert(cache.contains(7203));
 }
 
-void test_hotness_policy_resets_scores_on_epoch_change() {
+void test_hotness_policy_epoch_history_resets_scores_on_epoch_change() {
     HotnessOnlyPolicy policy(hotness_config());
     const Request request = make_request(1, 7301, 8);
 
@@ -241,6 +245,83 @@ void test_hotness_policy_resets_scores_on_epoch_change() {
 
     policy.on_epoch_start(1);
     assert(policy.access_count(7301) == 0);
+}
+
+void test_hotness_policy_cumulative_history_preserves_scores() {
+    HotnessOnlyPolicy policy(
+        hotness_config(2, HotnessHistoryMode::Cumulative));
+    const Request request = make_request(1, 7302, 8);
+
+    policy.on_lookup(request, 1, false);
+    policy.on_lookup(request, 2, false);
+    policy.on_epoch_start(1);
+
+    assert(policy.access_count(7302) == 2);
+}
+
+void test_hotness_policy_windowed_history_prunes_old_epochs() {
+    HotnessOnlyPolicy policy(
+        hotness_config(2, HotnessHistoryMode::Windowed, 2));
+
+    policy.on_epoch_start(0);
+    policy.on_lookup(make_request(1, 7303, 8, 0), 1, false);
+    assert(policy.access_count(7303) == 1);
+
+    policy.on_epoch_start(1);
+    policy.on_lookup(make_request(2, 7303, 8, 1), 2, false);
+    assert(policy.access_count(7303) == 2);
+
+    policy.on_epoch_start(2);
+    assert(policy.access_count(7303) == 1);
+    policy.on_lookup(make_request(3, 7303, 8, 2), 3, false);
+    assert(policy.access_count(7303) == 2);
+
+    policy.on_epoch_start(3);
+    assert(policy.access_count(7303) == 1);
+}
+
+void test_hotness_policy_windowed_admission_uses_in_window_count() {
+    LocalCache cache(
+        16,
+        std::make_unique<HotnessOnlyPolicy>(
+            hotness_config(2, HotnessHistoryMode::Windowed, 2)));
+
+    cache.on_epoch_start(0);
+    const Request first = make_request(1, 7304, 8, 0);
+    assert(!cache.lookup(first, 1));
+    assert(!cache.admit(first, make_response(1, 7304), 2));
+
+    cache.on_epoch_start(1);
+    const Request second = make_request(2, 7304, 8, 1);
+    assert(!cache.lookup(second, 3));
+    assert(cache.admit(second, make_response(2, 7304), 4));
+
+    cache.on_epoch_start(3);
+    const Request stale = make_request(3, 7305, 8, 3);
+    assert(!cache.lookup(stale, 5));
+    assert(!cache.admit(stale, make_response(3, 7305), 6));
+}
+
+void test_hotness_policy_windowed_eviction_uses_in_window_count() {
+    HotnessOnlyPolicy policy(
+        hotness_config(1, HotnessHistoryMode::Windowed, 2));
+    std::unordered_map<ObjectId, CacheEntry> entries;
+    entries.emplace(7306, CacheEntry{7306, 8, 1, 1});
+    entries.emplace(7307, CacheEntry{7307, 8, 2, 2});
+
+    policy.on_epoch_start(0);
+    policy.on_lookup(make_request(1, 7306, 8, 0), 1, false);
+    policy.on_lookup(make_request(2, 7306, 8, 0), 2, false);
+    policy.on_lookup(make_request(3, 7307, 8, 0), 3, false);
+
+    policy.on_epoch_start(2);
+    policy.on_lookup(make_request(4, 7308, 8, 2), 4, false);
+    policy.on_lookup(make_request(5, 7308, 8, 2), 5, false);
+
+    const std::optional<ObjectId> victim =
+        policy.select_victim(entries, make_request(6, 7308, 8, 2));
+    assert(victim.has_value());
+    assert(*victim == 7306);
 }
 
 void test_global_replica_installation_respects_capacity_and_replaces_entries() {
@@ -452,7 +533,11 @@ int main() {
     test_hotness_policy_counts_hits_and_misses();
     test_hotness_policy_waits_for_admit_threshold();
     test_hotness_policy_evicts_coldest_resident();
-    test_hotness_policy_resets_scores_on_epoch_change();
+    test_hotness_policy_epoch_history_resets_scores_on_epoch_change();
+    test_hotness_policy_cumulative_history_preserves_scores();
+    test_hotness_policy_windowed_history_prunes_old_epochs();
+    test_hotness_policy_windowed_admission_uses_in_window_count();
+    test_hotness_policy_windowed_eviction_uses_in_window_count();
     test_global_replica_installation_respects_capacity_and_replaces_entries();
     test_contention_policy_uses_local_hotness_for_epoch_zero();
     test_contention_policy_scores_previous_epoch_contention();

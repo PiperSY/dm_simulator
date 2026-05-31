@@ -1,5 +1,7 @@
 #include "cache/hotness_policy.hpp"
 
+#include <vector>
+
 namespace dm_sim {
 
 HotnessOnlyPolicy::HotnessOnlyPolicy(HotnessPolicyConfig config)
@@ -11,12 +13,20 @@ void HotnessOnlyPolicy::on_lookup(const Request& request,
     (void)access_time;
     (void)hit;
     ++access_counts_[request.object_id];
+    if (config_.history_mode == HotnessHistoryMode::Windowed) {
+        ++epoch_access_counts_[request.epoch_id][request.object_id];
+    }
 }
 
 void HotnessOnlyPolicy::on_epoch_start(EpochId epoch_id) const {
-    (void)epoch_id;
-    if (config_.reset_on_epoch_change) {
+    if (config_.history_mode == HotnessHistoryMode::Epoch) {
         access_counts_.clear();
+        epoch_access_counts_.clear();
+        return;
+    }
+
+    if (config_.history_mode == HotnessHistoryMode::Windowed) {
+        prune_window(epoch_id);
     }
 }
 
@@ -78,6 +88,37 @@ std::uint64_t HotnessOnlyPolicy::count_for(ObjectId object_id) const {
     }
 
     return it->second;
+}
+
+void HotnessOnlyPolicy::prune_window(EpochId epoch_id) const {
+    std::vector<EpochId> epochs_to_remove;
+    for (const auto& epoch_entry : epoch_access_counts_) {
+        if (epoch_entry.first + config_.history_window_epochs <= epoch_id) {
+            epochs_to_remove.push_back(epoch_entry.first);
+        }
+    }
+
+    for (EpochId old_epoch : epochs_to_remove) {
+        subtract_epoch_counts(epoch_access_counts_.at(old_epoch));
+        epoch_access_counts_.erase(old_epoch);
+    }
+}
+
+void HotnessOnlyPolicy::subtract_epoch_counts(
+    const std::unordered_map<ObjectId, std::uint64_t>& epoch_counts) const {
+    for (const auto& count_entry : epoch_counts) {
+        auto total_it = access_counts_.find(count_entry.first);
+        if (total_it == access_counts_.end()) {
+            continue;
+        }
+
+        if (total_it->second <= count_entry.second) {
+            access_counts_.erase(total_it);
+            continue;
+        }
+
+        total_it->second -= count_entry.second;
+    }
 }
 
 void GlobalHottestReplicationPolicy::on_access(CacheEntry& entry,
