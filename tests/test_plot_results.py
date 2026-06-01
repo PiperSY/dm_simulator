@@ -21,6 +21,16 @@ def read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(input_file))
 
 
+def write_rows(path: Path,
+               fieldnames: list[str],
+               rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -186,7 +196,11 @@ def main() -> int:
     )
     viability_files = [
         viability_dir / "plots" / "viability_churn_epoch_heatmap.svg",
+        viability_dir / "plots" / "viability_cache_pressure_by_churn.svg",
         viability_dir / "plots" / "viability_admission_quality.svg",
+        viability_dir / "plots" / "viability_admission_quality_by_churn.svg",
+        viability_dir / "plots" / "viability_remote_pressure_by_churn.svg",
+        viability_dir / "plots" / "viability_fairness_by_churn.svg",
         viability_dir / "plots" / "viability_scatter.svg",
     ]
     for path in viability_files:
@@ -196,6 +210,39 @@ def main() -> int:
     )
     require("Report mode: `policy_viability`" in viability_report,
             "Viability report should auto-detect policy viability mode")
+    require("Churn-Conditioned Policy Viability" in viability_report,
+            "Viability report should group churn-conditioned plots")
+
+    single_churn_fixture = output_dir.parent / "aggregate_viability_single_churn.csv"
+    with (repo_root / "tests" / "fixtures" /
+          "aggregate_summary_viability.csv").open(
+              "r",
+              encoding="utf-8",
+              newline="",
+          ) as input_file:
+        reader = csv.DictReader(input_file)
+        fieldnames = list(reader.fieldnames or [])
+        single_churn_rows = [
+            row for row in reader
+            if row["hot_set_churn_fraction"] == "0.0"
+        ]
+    extra_cache_rows = []
+    for row in single_churn_rows:
+        duplicate = dict(row)
+        duplicate["experiment_name"] = duplicate["experiment_name"] + "_cache1"
+        duplicate["cache_capacity_hotset_multiplier"] = "1.0"
+        duplicate["cache_capacity_bytes"] = "512"
+        duplicate["output_dir"] = duplicate["output_dir"] + "_cache1"
+        extra_cache_rows.append(duplicate)
+    single_churn_rows.extend(extra_cache_rows)
+    write_rows(single_churn_fixture, fieldnames, single_churn_rows)
+    single_churn_dir = output_dir.parent / "plot_results_viability_single_churn"
+    run_plot_results(script, single_churn_fixture, single_churn_dir)
+    single_churn_plot = (
+        single_churn_dir / "plots" / "viability_cache_pressure_by_churn.svg"
+    )
+    require(single_churn_plot.exists(),
+            "Single-churn viability report should still render the facet plot")
 
     interaction_dir = output_dir.parent / "plot_results_interaction"
     run_plot_results(

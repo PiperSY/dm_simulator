@@ -51,7 +51,6 @@ EVAL_CONTENTION_CALIBRATION_POLICIES = (
 
 EVAL_POLICY_VIABILITY_POLICIES = (
     "lru",
-    "hotness_only_cumulative",
     "hotness_only_windowed",
     "global_hottest_replication",
     *CONTENTION_VARIANT_POLICIES,
@@ -404,19 +403,19 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.2,
-        cache_capacity_hotset_multipliers=(0.25, 0.5, 1.0),
+        large_object_probability=0.1,
+        cache_capacity_hotset_multipliers=(0.2, 0.3, 0.4, 0.5, 0.6),
         memory_bandwidth_levels=("severe",),
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
-        requests_per_node_per_epoch_values=(16, 64, 256),
-        epoch_count_values=(8,),
-        hot_set_size_values=(8,),
-        hot_access_probabilities=(0.6,),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
-        hot_set_churn_fractions=(0.0, 0.25, 0.5, 0.75, 1.0),
-        cross_node_overlaps=("medium",),
-        object_size_modes=("fixed",),
+        hot_set_churn_fractions=(0.05, 0.1, 0.2, 0.3, 0.4),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
     ),
     # Phase E keeps architecture/workload fixed enough to compare policy
     # variants, while still probing temporal stability through epoch length
@@ -1017,7 +1016,7 @@ def write_yaml_config(run: MatrixRun) -> None:
                 "    size_penalty_weight: 0.5",
                 "    min_admit_score: 1.0",
                 "    local_hotness_threshold: 2",
-                f"    reset_on_epoch_change: {yaml_bool(False)}",
+                f"    reset_on_epoch_change: {yaml_bool(True)}",
             ]
         )
         if contention_variant == "smoothed":
@@ -1025,7 +1024,7 @@ def write_yaml_config(run: MatrixRun) -> None:
                 [
                     "    # Smoothed telemetry blends the last few prior epochs",
                     "    # so one unlucky epoch does not dominate admissions.",
-                    "    telemetry_history_epochs: 3",
+                    "    telemetry_history_epochs: 2",
                     "    telemetry_decay: 0.5",
                 ]
             )

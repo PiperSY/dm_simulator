@@ -1020,6 +1020,85 @@ def line_sweep_plot(plt: Any,
     return fig
 
 
+def faceted_line_sweep_plot(
+    plt: Any,
+    rows: list[dict[str, Any]],
+    facet_column: str,
+    x_column: str,
+    y_specs: list[tuple[str, str, float]],
+    title: str,
+    facet_label: str,
+    x_label: str,
+    numeric_x: bool = True,
+) -> Any:
+    """Create line charts that condition a sweep on one matrix dimension."""
+
+    facet_values = distinct_values(rows, facet_column)
+    policies = ordered_policies(rows)
+    if not facet_values or not policies:
+        return plot_placeholder(plt, title, "No data available for this plot.")
+
+    fig, axes = plt.subplots(
+        len(y_specs),
+        len(facet_values),
+        figsize=(max(10, 3.8 * len(facet_values)),
+                 max(4.5, 3.4 * len(y_specs))),
+        squeeze=False,
+    )
+    any_data = False
+    legend_handles = []
+    legend_labels = []
+    for facet_index, facet_value in enumerate(facet_values):
+        facet_rows = [
+            row for row in rows
+            if str(row.get(facet_column, "")) == str(facet_value)
+        ]
+        for metric_index, (y_column, y_label, scale) in enumerate(y_specs):
+            ax = axes[metric_index][facet_index]
+            by_policy = aggregate_for_line(
+                facet_rows,
+                x_column,
+                y_column,
+                numeric_x,
+            )
+            for policy in policies:
+                points = by_policy.get(policy, [])
+                if not points:
+                    continue
+                any_data = True
+                xs = [point[0] for point in points]
+                ys = [point[1] * scale for point in points]
+                line, = ax.plot(xs, ys, marker="o", label=policy)
+                if policy not in legend_labels:
+                    legend_handles.append(line)
+                    legend_labels.append(policy)
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.35)
+            ax.grid(alpha=0.3)
+            if metric_index == 0:
+                ax.set_title(f"{facet_label}: {facet_value}")
+            if facet_index == 0:
+                ax.set_ylabel(y_label)
+            if metric_index == len(y_specs) - 1:
+                ax.set_xlabel(x_label)
+            if not numeric_x:
+                ax.tick_params(axis="x", rotation=20)
+
+    fig.suptitle(title)
+    if legend_handles:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            ncol=min(4, len(legend_labels)),
+            fontsize="small",
+        )
+    fig.tight_layout(rect=[0.0, 0.08, 1.0, 0.94])
+    if not any_data:
+        plt.close(fig)
+        return plot_placeholder(plt, title, "No data available for this plot.")
+    return fig
+
+
 def average_by_key(rows: list[dict[str, Any]],
                    key_columns: tuple[str, ...],
                    metric_column: str) -> dict[tuple[str, ...], float]:
@@ -1621,6 +1700,78 @@ def viability_admission_quality_plot(
     return fig
 
 
+def viability_admission_quality_by_churn_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Show whether placement quality decays as hot sets churn."""
+
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "hot_set_churn_fraction",
+        [
+            ("admission_yield", "Admission yield", 1.0),
+            ("reuse_after_admit_rate", "Reuse-after-admit rate", 1.0),
+            ("estimated_avoided_contention_cost",
+             "Estimated contention relief",
+             1.0),
+            ("eviction_regret_count", "Eviction regret count", 1.0),
+        ],
+        "Admission quality by hot-set churn",
+        "Hot-set churn fraction",
+    )
+
+
+def viability_remote_pressure_by_churn_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Show whether policies reduce remote-memory pressure under churn."""
+
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "hot_set_churn_fraction",
+        [
+            ("total_remote_accesses_delta_pct",
+             "Remote-access delta vs baseline (%)",
+             100.0),
+            ("average_memory_wait_delta_pct",
+             "Average memory-wait delta vs baseline (%)",
+             100.0),
+            ("estimated_avoided_contention_cost",
+             "Estimated contention relief",
+             1.0),
+        ],
+        "Remote pressure by hot-set churn",
+        "Hot-set churn fraction",
+    )
+
+
+def viability_fairness_by_churn_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Show whether policy choices create node-level imbalance under churn."""
+
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "hot_set_churn_fraction",
+        [
+            ("jain_inverse_latency_fairness",
+             "Jain inverse-latency fairness",
+             1.0),
+            ("per_node_mean_latency_spread",
+             "Per-node mean-latency spread",
+             1.0),
+        ],
+        "Fairness by hot-set churn",
+        "Hot-set churn fraction",
+    )
+
+
 def make_fairness_plot(plt: Any,
                        policy_summary: list[dict[str, Any]]) -> Any:
     """Plot fairness and node imbalance by policy."""
@@ -1682,7 +1833,7 @@ def generate_common_plots(plt: Any,
         plt,
         plots_dir,
         formats,
-        "Common Policy Overview",
+        "Global Average Views",
         [
             ("policy_latency_overview",
              make_policy_latency_plot(plt, policy_summary)),
@@ -1887,6 +2038,7 @@ def generate_policy_viability_plots(
     """Generate plots for contention-aware policy viability studies."""
 
     plot_specs: list[tuple[str, Any]] = []
+    conditioned_specs: list[tuple[str, Any]] = []
     if {"hot_set_churn_fraction",
             "requests_per_node_per_epoch"}.issubset(swept):
         rows = [
@@ -1929,6 +2081,53 @@ def generate_policy_viability_plots(
                 ),
             )
         )
+        if distinct_values(comparison_rows, "hot_set_churn_fraction"):
+            conditioned_specs.append(
+                (
+                    "viability_cache_pressure_by_churn",
+                    faceted_line_sweep_plot(
+                        plt,
+                        comparison_rows,
+                        "hot_set_churn_fraction",
+                        "cache_capacity_hotset_multiplier",
+                        [
+                            ("mean_latency_delta_pct",
+                             "Mean latency delta (%)",
+                             100.0),
+                            ("local_hit_rate", "Local hit rate", 1.0),
+                        ],
+                        "Policy viability across cache pressure by churn",
+                        "Hot-set churn",
+                        "Cache capacity / hot-set footprint",
+                    ),
+                )
+            )
+    if "hot_set_churn_fraction" in swept:
+        conditioned_specs.extend(
+            [
+                (
+                    "viability_admission_quality_by_churn",
+                    viability_admission_quality_by_churn_plot(
+                        plt,
+                        comparison_rows,
+                    ),
+                ),
+                (
+                    "viability_remote_pressure_by_churn",
+                    viability_remote_pressure_by_churn_plot(
+                        plt,
+                        comparison_rows,
+                    ),
+                ),
+                (
+                    "viability_fairness_by_churn",
+                    viability_fairness_by_churn_plot(
+                        plt,
+                        comparison_rows,
+                    ),
+                ),
+            ]
+        )
     plot_specs.extend(
         [
             ("viability_scatter",
@@ -1937,13 +2136,23 @@ def generate_policy_viability_plots(
              viability_admission_quality_plot(plt, policy_summary)),
         ]
     )
-    return save_plot_specs(
+    outputs = save_plot_specs(
         plt,
         plots_dir,
         formats,
-        "Policy Viability",
+        "Policy Viability Global Views",
         plot_specs,
     )
+    outputs.extend(
+        save_plot_specs(
+            plt,
+            plots_dir,
+            formats,
+            "Churn-Conditioned Policy Viability",
+            conditioned_specs,
+        )
+    )
+    return outputs
 
 
 def interaction_axes_for_preset(preset: str) -> tuple[str, str] | None:
@@ -2423,6 +2632,21 @@ def write_report(path: Path,
             "question is about reducing shared bottleneck pressure, not only "
             "maximizing local hits.",
             "",
+        ]
+    )
+    if report_mode == "policy_viability":
+        lines.extend(
+            [
+                "For policy-viability runs, global-average plots summarize all "
+                "regimes together. Churn-conditioned plots should be used to "
+                "separate stable, predictive telemetry from high-churn regimes "
+                "where stale telemetry is expected to hurt contention-aware "
+                "policies.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "## Generated Files",
             "",
             "- `policy_comparison.csv`",

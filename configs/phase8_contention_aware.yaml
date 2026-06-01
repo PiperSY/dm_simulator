@@ -5,7 +5,7 @@ experiment:
 memory:
   node_id: 99
   base_latency: 25
-  bandwidth_bytes_per_time: 16
+  bandwidth_bytes_per_time: 8
 
 link:
   one_way_latency: 6
@@ -15,6 +15,7 @@ local_cache:
   hit_latency: 1
   policy: contention_aware
   contention:
+    variant: smoothed
     local_hotness_weight: 1.0
     remote_access_weight: 1.0
     distinct_requester_weight: 1.5
@@ -23,21 +24,23 @@ local_cache:
     size_penalty_weight: 0.5
     min_admit_score: 1.0
     local_hotness_threshold: 2
-    reset_on_epoch_change: true
+    reset_on_epoch_change: false
+    telemetry_history_epochs: 4
+    telemetry_decay: 0.25
 
 workload:
   seed: 8888
-  compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8]
+  compute_node_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
   object_count: 256
   object_size_bytes: 64
   hot_set_churn_fraction: 0.4
   object_size_mode: bimodal
   object_size_small_bytes: 64
   object_size_large_bytes: 256
-  large_object_probability: 0.2
-  requests_per_node_per_epoch: 64
-  epoch_count: 16
-  hot_set_size: 8
-  hot_access_probability: 0.6
+  large_object_probability: 0.1
+  requests_per_node_per_epoch: 8
+  epoch_count: 32
+  hot_set_size: 16
+  hot_access_probability: 0.8
   hot_set_mode: epoch_shift
-  cross_node_overlap: medium
+  cross_node_overlap: high
