@@ -212,6 +212,34 @@ add_test(
 )
 
 add_test(
+    NAME experiment_matrix_eval_channel_calibration_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_channel_calibration
+        --dry-run
+        --expect-runs
+        8
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_channel_calibration_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_channel_hotspots_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_channel_hotspots
+        --dry-run
+        --expect-runs
+        9
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_channel_hotspots_dry_run
+)
+
+add_test(
     NAME experiment_matrix_eval_policy_viability_dry_run
     COMMAND
         ${Python3_EXECUTABLE}

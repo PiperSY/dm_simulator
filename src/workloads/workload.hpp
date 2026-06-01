@@ -38,10 +38,16 @@ struct SyntheticWorkloadConfig {
     std::vector<NodeId> compute_node_ids;
     // Number of distinct objects available to the workload.
     std::uint64_t object_count = 0;
+    // Memory channels are supplied by SimulationConfig so workload generation
+    // can create optional channel-local hot spots without duplicating YAML.
+    std::uint64_t memory_channel_count = 1;
     // Size attached to every generated request.
     std::uint64_t object_size_bytes = 64;
     // Fraction of each hot-set segment replaced between shifted epochs.
     double hot_set_churn_fraction = 1.0;
+    // Zero means unrestricted. Positive values restrict hot objects to the
+    // first N memory channels, creating controlled channel-local pressure.
+    std::uint64_t hot_object_channel_count = 0;
     // Controls whether object sizes are fixed or drawn once per object.
     ObjectSizeMode object_size_mode = ObjectSizeMode::Fixed;
     // Bimodal size parameters used when object_size_mode is Bimodal.

@@ -30,6 +30,9 @@ void Stats::observe_memory_queue_depth(std::size_t queue_depth) {
     if (queue_depth > peak_memory_queue_depth_) {
         peak_memory_queue_depth_ = queue_depth;
     }
+    if (queue_depth > peak_memory_channel_queue_depth_) {
+        peak_memory_channel_queue_depth_ = queue_depth;
+    }
 }
 
 // Records a local cache hit globally and for the node that performed it.
@@ -47,20 +50,32 @@ void Stats::record_cache_miss(NodeId node_id) {
 // Counts a remote object access and updates requester diversity and observed
 // queue depth for that object's epoch-specific contention bucket.
 void Stats::record_remote_access(const Request& request,
+                                 MemoryChannelId memory_channel_id,
                                  std::size_t observed_queue_depth) {
-    InternalObjectContentionStats& bucket = contention_bucket(request);
+    InternalObjectContentionStats& bucket =
+        contention_bucket(request, memory_channel_id);
     ++bucket.stats.remote_accesses;
     bucket.requesters.insert(request.source_node_id);
     bucket.stats.distinct_requesters = bucket.requesters.size();
     if (observed_queue_depth > bucket.stats.max_observed_queue_depth) {
         bucket.stats.max_observed_queue_depth = observed_queue_depth;
     }
+
+    InternalChannelContentionStats& channel =
+        channel_bucket(request.epoch_id, memory_channel_id);
+    ++channel.stats.remote_accesses;
+    if (observed_queue_depth > channel.stats.max_queue_depth) {
+        channel.stats.max_queue_depth = observed_queue_depth;
+    }
 }
 
 // Records time spent waiting in an object's remote-service queue and refreshes
 // aggregate wait metrics for that object in the current epoch.
-void Stats::record_object_queue_wait(const Request& request, SimTime wait_time) {
-    InternalObjectContentionStats& bucket = contention_bucket(request);
+void Stats::record_object_queue_wait(const Request& request,
+                                     MemoryChannelId memory_channel_id,
+                                     SimTime wait_time) {
+    InternalObjectContentionStats& bucket =
+        contention_bucket(request, memory_channel_id);
     bucket.stats.total_queue_wait += wait_time;
     ++bucket.stats.queue_wait_samples;
     if (wait_time > bucket.stats.max_queue_wait) {
@@ -69,14 +84,33 @@ void Stats::record_object_queue_wait(const Request& request, SimTime wait_time) 
     bucket.stats.average_queue_wait =
         static_cast<double>(bucket.stats.total_queue_wait) /
         static_cast<double>(bucket.stats.queue_wait_samples);
+
+    InternalChannelContentionStats& channel =
+        channel_bucket(request.epoch_id, memory_channel_id);
+    channel.stats.total_queue_wait += wait_time;
+    ++channel.stats.queue_wait_samples;
+    if (wait_time > channel.stats.max_queue_wait) {
+        channel.stats.max_queue_wait = wait_time;
+    }
+    channel.stats.average_queue_wait =
+        static_cast<double>(channel.stats.total_queue_wait) /
+        static_cast<double>(channel.stats.queue_wait_samples);
 }
 
 // Adds service-time and byte-count contribution for a completed remote object
 // access.
-void Stats::record_object_service(const Request& request, SimTime service_time) {
-    InternalObjectContentionStats& bucket = contention_bucket(request);
+void Stats::record_object_service(const Request& request,
+                                  MemoryChannelId memory_channel_id,
+                                  SimTime service_time) {
+    InternalObjectContentionStats& bucket =
+        contention_bucket(request, memory_channel_id);
     bucket.stats.total_remote_service_time += service_time;
     bucket.stats.bytes_served += request.size_bytes;
+
+    InternalChannelContentionStats& channel =
+        channel_bucket(request.epoch_id, memory_channel_id);
+    channel.stats.total_remote_service_time += service_time;
+    channel.stats.bytes_served += request.size_bytes;
 }
 
 // Returns the total number of completed requests with recorded latency samples.
@@ -170,6 +204,10 @@ SimTime Stats::max_memory_wait() const noexcept {
 // Returns the highest memory queue depth observed.
 std::size_t Stats::peak_memory_queue_depth() const noexcept {
     return peak_memory_queue_depth_;
+}
+
+std::size_t Stats::peak_memory_channel_queue_depth() const noexcept {
+    return peak_memory_channel_queue_depth_;
 }
 
 // Returns the total number of local cache hits.
@@ -364,14 +402,84 @@ std::vector<ObjectContentionStats> Stats::top_contention_objects(
     return stats;
 }
 
+std::optional<ChannelContentionStats> Stats::channel_contention(
+    EpochId epoch_id,
+    MemoryChannelId memory_channel_id) const {
+    const auto epoch_it = channel_contention_by_epoch_.find(epoch_id);
+    if (epoch_it == channel_contention_by_epoch_.end()) {
+        return std::nullopt;
+    }
+
+    const auto channel_it = epoch_it->second.find(memory_channel_id);
+    if (channel_it == epoch_it->second.end()) {
+        return std::nullopt;
+    }
+
+    return snapshot_channel_contention(channel_it->second);
+}
+
+std::vector<ChannelContentionStats> Stats::channel_contention_by_epoch(
+    EpochId epoch_id) const {
+    const auto epoch_it = channel_contention_by_epoch_.find(epoch_id);
+    if (epoch_it == channel_contention_by_epoch_.end()) {
+        return {};
+    }
+
+    std::vector<ChannelContentionStats> stats;
+    stats.reserve(epoch_it->second.size());
+    for (const auto& channel_entry : epoch_it->second) {
+        stats.push_back(snapshot_channel_contention(channel_entry.second));
+    }
+
+    std::sort(stats.begin(),
+              stats.end(),
+              [](const ChannelContentionStats& lhs,
+                 const ChannelContentionStats& rhs) {
+                  return lhs.memory_channel_id < rhs.memory_channel_id;
+              });
+    return stats;
+}
+
+std::vector<ChannelContentionStats> Stats::all_channel_contention_stats() const {
+    std::vector<ChannelContentionStats> stats;
+    for (const auto& epoch_entry : channel_contention_by_epoch_) {
+        for (const auto& channel_entry : epoch_entry.second) {
+            stats.push_back(snapshot_channel_contention(channel_entry.second));
+        }
+    }
+
+    std::sort(stats.begin(),
+              stats.end(),
+              [](const ChannelContentionStats& lhs,
+                 const ChannelContentionStats& rhs) {
+                  if (lhs.epoch_id != rhs.epoch_id) {
+                      return lhs.epoch_id < rhs.epoch_id;
+                  }
+                  return lhs.memory_channel_id < rhs.memory_channel_id;
+              });
+    return stats;
+}
+
 // Retrieves or creates the internal contention bucket for a request's
 // epoch/object pair and stamps the public identifiers onto it.
 Stats::InternalObjectContentionStats& Stats::contention_bucket(
-    const Request& request) {
+    const Request& request,
+    MemoryChannelId memory_channel_id) {
     InternalObjectContentionStats& bucket =
         contention_by_epoch_[request.epoch_id][request.object_id];
     bucket.stats.epoch_id = request.epoch_id;
     bucket.stats.object_id = request.object_id;
+    bucket.stats.memory_channel_id = memory_channel_id;
+    return bucket;
+}
+
+Stats::InternalChannelContentionStats& Stats::channel_bucket(
+    EpochId epoch_id,
+    MemoryChannelId memory_channel_id) {
+    InternalChannelContentionStats& bucket =
+        channel_contention_by_epoch_[epoch_id][memory_channel_id];
+    bucket.stats.epoch_id = epoch_id;
+    bucket.stats.memory_channel_id = memory_channel_id;
     return bucket;
 }
 
@@ -381,6 +489,19 @@ ObjectContentionStats Stats::snapshot_contention(
     const InternalObjectContentionStats& internal_stats) {
     ObjectContentionStats snapshot = internal_stats.stats;
     snapshot.distinct_requesters = internal_stats.requesters.size();
+    if (snapshot.queue_wait_samples == 0) {
+        snapshot.average_queue_wait = 0.0;
+    } else {
+        snapshot.average_queue_wait =
+            static_cast<double>(snapshot.total_queue_wait) /
+            static_cast<double>(snapshot.queue_wait_samples);
+    }
+    return snapshot;
+}
+
+ChannelContentionStats Stats::snapshot_channel_contention(
+    const InternalChannelContentionStats& internal_stats) {
+    ChannelContentionStats snapshot = internal_stats.stats;
     if (snapshot.queue_wait_samples == 0) {
         snapshot.average_queue_wait = 0.0;
     } else {

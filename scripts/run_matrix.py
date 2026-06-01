@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import itertools
 import json
 import math
 import subprocess
@@ -78,6 +80,17 @@ EVAL_CONTENTION_WEIGHT_POLICIES = (
     "contention_aware_smoothed",
 )
 
+EVAL_CHANNEL_CALIBRATION_POLICIES = (
+    "always_remote",
+    "lru",
+)
+
+EVAL_CHANNEL_HOTSPOT_POLICIES = (
+    "lru",
+    "hotness_only_windowed",
+    "contention_aware_smoothed",
+)
+
 POLICIES = (
     *BASE_POLICIES,
     "hotness_only_cumulative",
@@ -116,6 +129,8 @@ RUN_NAME_ALIASES = {
     "eval_knob_object_size_mix": "knob_size_mix",
     "eval_knob_hot_concentration": "knob_hotp",
     "eval_contention_weight_sensitivity": "weight_sensitivity",
+    "eval_channel_calibration": "chcal",
+    "eval_channel_hotspots": "chhot",
 }
 
 
@@ -215,6 +230,8 @@ AGGREGATE_COLUMNS = (
     "large_object_probability",
     "cache_capacity_hotset_multiplier",
     "cache_capacity_bytes",
+    "memory_channel_count",
+    "hot_object_channel_count",
     "memory_bandwidth_level",
     "memory_bandwidth_bytes_per_time",
     "memory_base_latency_level",
@@ -232,6 +249,9 @@ AGGREGATE_COLUMNS = (
     "average_memory_wait",
     "max_memory_wait",
     "peak_memory_queue_depth",
+    "peak_memory_channel_queue_depth",
+    "max_channel_total_queue_wait",
+    "channel_queue_imbalance",
     "total_remote_accesses",
     "total_queue_wait",
     "total_remote_service_time",
@@ -297,6 +317,11 @@ class MatrixPreset:
             "low", "medium", or "high".
         object_size_modes: Object-size mode sweep values: "fixed" or
             "bimodal".
+        memory_channel_counts: Memory parallelism sweep. Each channel is an
+            independent FIFO server in the simulator's memory-node model.
+        hot_object_channel_counts: Hotspot concentration sweep. Zero leaves hot
+            objects unrestricted; positive values restrict hot objects to the
+            first N memory channels.
     """
 
     name: str
@@ -321,6 +346,8 @@ class MatrixPreset:
     hot_set_churn_fractions: tuple[float, ...]
     cross_node_overlaps: tuple[str, ...]
     object_size_modes: tuple[str, ...]
+    memory_channel_counts: tuple[int, ...] = (1,)
+    hot_object_channel_counts: tuple[int, ...] = (0,)
 
 
 @dataclass(frozen=True)
@@ -347,6 +374,10 @@ class MatrixRun:
             bimodal mode.
         cache_capacity_hotset_multiplier: Cache size as a multiple of one hot
             set's representative byte footprint.
+        memory_channel_count: Number of independent memory-channel FIFO
+            servers available in this run.
+        hot_object_channel_count: Number of channels eligible for hot objects;
+            zero means hot objects are unrestricted.
         memory_bandwidth_level: Named memory bandwidth setting.
         memory_base_latency_level: Named memory base-latency setting.
         link_latency_level: Named one-way link-latency setting.
@@ -370,6 +401,8 @@ class MatrixRun:
     object_size_mode: str
     large_object_probability: float
     cache_capacity_hotset_multiplier: float
+    memory_channel_count: int
+    hot_object_channel_count: int
     memory_bandwidth_level: str
     memory_base_latency_level: str
     link_latency_level: str
@@ -504,6 +537,62 @@ PRESETS = {
         hot_set_churn_fractions=(0.5,),
         cross_node_overlaps=("low", "medium", "high"),
         object_size_modes=("fixed",),
+    ),
+    # Channel calibration: isolate how adding independent memory-channel FIFO
+    # servers reduces the artificial global queueing of the original model.
+    "eval_channel_calibration": MatrixPreset(
+        name="eval_channel_calibration",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(128,),
+        epoch_count_values=(16,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("fixed",),
+        memory_channel_counts=(1, 2, 4, 8),
+        hot_object_channel_counts=(0,),
+    ),
+    # Channel hotspots: keep memory parallelism fixed, then concentrate hot
+    # objects onto fewer channels to create localized resource contention.
+    "eval_channel_hotspots": MatrixPreset(
+        name="eval_channel_hotspots",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(128,),
+        epoch_count_values=(16,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts=(1, 2, 4),
     ),
     # Final evaluation policy matrix: compare practical baselines and
     # contention-aware variants inside a known high-contention regime.
@@ -796,6 +885,9 @@ def parse_args() -> argparse.Namespace:
         --object-size-modes: Comma-separated object-size generation modes.
         --large-object-probabilities: Comma-separated large-object probabilities
             for bimodal workloads.
+        --memory-channel-counts: Comma-separated memory-channel counts.
+        --hot-object-channel-counts: Comma-separated hot-object channel limits;
+            zero means unrestricted hot-object channel selection.
         --expect-runs: Optional dry-run assertion for generated run count.
         --dry-run: Generate configs and aggregate rows without simulation.
         --keep-going: Continue the matrix after a simulator failure.
@@ -905,6 +997,16 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated bimodal large-object probabilities in [0, 1].",
     )
     parser.add_argument(
+        "--memory-channel-counts",
+        default=None,
+        help="Comma-separated memory channel counts overriding the preset.",
+    )
+    parser.add_argument(
+        "--hot-object-channel-counts",
+        default=None,
+        help="Comma-separated hot-object channel limits; 0 means unrestricted.",
+    )
+    parser.add_argument(
         "--expect-runs",
         type=int,
         default=None,
@@ -972,6 +1074,23 @@ def parse_positive_ints(value: str) -> list[int]:
             raise SystemExit(f"Invalid integer '{item}'") from error
         if parsed <= 0:
             raise SystemExit(f"Invalid positive integer '{item}'")
+        values.append(parsed)
+    if not values:
+        raise SystemExit("At least one integer value is required")
+    return values
+
+
+def parse_nonnegative_ints(value: str) -> list[int]:
+    """Parse comma-separated nonnegative integers for sweep dimensions."""
+
+    values = []
+    for item in parse_csv_list(value):
+        try:
+            parsed = int(item)
+        except ValueError as error:
+            raise SystemExit(f"Invalid integer '{item}'") from error
+        if parsed < 0:
+            raise SystemExit(f"Invalid nonnegative integer '{item}'")
         values.append(parsed)
     if not values:
         raise SystemExit("At least one integer value is required")
@@ -1140,6 +1259,8 @@ def run_slug(preset: MatrixPreset,
              object_size_mode: str,
              large_object_probability: float,
              cache_multiplier: float,
+             memory_channel_count: int,
+             hot_object_channel_count: int,
              memory_bandwidth_level: str,
              memory_base_latency_level: str,
              link_latency_level: str) -> str:
@@ -1150,7 +1271,7 @@ def run_slug(preset: MatrixPreset,
         if contention_weight_profile.profile
         else ""
     )
-    return (
+    full_name = (
         f"{run_name_token(preset.name)}"
         f"__policy-{run_name_token(policy)}"
         f"{weight_part}"
@@ -1167,10 +1288,29 @@ def run_slug(preset: MatrixPreset,
         f"__size-{object_size_mode}"
         f"__largep-{slug_float(large_object_probability)}"
         f"__cachex-{slug_float(cache_multiplier)}"
+        f"__memch-{memory_channel_count}"
+        f"__hotch-{hot_object_channel_count}"
         f"__bw-{memory_bandwidth_level}"
         f"__base-{memory_base_latency_level}"
         f"__link-{link_latency_level}"
     )
+    return bounded_run_name(full_name)
+
+
+def bounded_run_name(name: str, max_length: int = 180) -> str:
+    """Keep generated file/directory names below common filesystem limits.
+
+    Matrix runs intentionally encode many dimensions in their names. Once
+    channel dimensions were added, some presets crossed macOS's 255-character
+    per-component limit. The aggregate CSV and generated YAML still preserve
+    every dimension exactly, so a readable prefix plus a stable hash is a good
+    compromise for filesystem safety.
+    """
+
+    if len(name) <= max_length:
+        return name
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
+    return f"{name[:max_length - len(digest) - 2]}__{digest}"
 
 
 def build_runs(
@@ -1188,6 +1328,8 @@ def build_runs(
     object_size_modes: list[str],
     large_object_probabilities: list[float],
     cache_multipliers: list[float],
+    memory_channel_counts: list[int],
+    hot_object_channel_counts: list[int],
     memory_bandwidth_levels: list[str],
     memory_base_latency_levels: list[str],
     link_latency_levels: list[str],
@@ -1201,74 +1343,101 @@ def build_runs(
     # This intentionally forms the full Cartesian product of selected
     # dimensions so every policy is evaluated against matched workloads and
     # architecture settings.
-    for seed in seeds:
-        for policy in policies:
-            # Most presets get the empty profile, but Phase 4C expands only
-            # contention_aware_smoothed into 24 one-at-a-time weight overrides.
-            weight_profiles = contention_weight_profiles_for_policy(
+    dimensions = itertools.product(
+        seeds,
+        policies,
+        node_counts,
+        object_counts,
+        epoch_counts,
+        epoch_lengths,
+        hot_set_sizes,
+        hot_access_probabilities,
+        churn_fractions,
+        overlaps,
+        object_size_modes,
+        large_object_probabilities,
+        cache_multipliers,
+        memory_channel_counts,
+        hot_object_channel_counts,
+        memory_bandwidth_levels,
+        memory_base_latency_levels,
+        link_latency_levels,
+    )
+    for (seed,
+         policy,
+         node_count,
+         object_count,
+         epoch_count,
+         epoch_length,
+         hot_set_size,
+         hot_access_probability,
+         churn_fraction,
+         overlap,
+         object_size_mode,
+         large_probability,
+         cache_multiplier,
+         memory_channel_count,
+         hot_object_channel_count,
+         bandwidth_level,
+         base_level,
+         link_level) in dimensions:
+        if hot_object_channel_count > memory_channel_count:
+            continue
+        # Most presets get the empty profile, but Phase 4C expands only
+        # contention_aware_smoothed into 24 one-at-a-time weight overrides.
+        for weight_profile in contention_weight_profiles_for_policy(
+            preset,
+            policy,
+        ):
+            name = run_slug(
                 preset,
                 policy,
+                weight_profile,
+                seed,
+                node_count,
+                object_count,
+                epoch_count,
+                epoch_length,
+                hot_set_size,
+                hot_access_probability,
+                churn_fraction,
+                overlap,
+                object_size_mode,
+                large_probability,
+                cache_multiplier,
+                memory_channel_count,
+                hot_object_channel_count,
+                bandwidth_level,
+                base_level,
+                link_level,
             )
-            for node_count in node_counts:
-                for object_count in object_counts:
-                    for epoch_count in epoch_counts:
-                        for epoch_length in epoch_lengths:
-                            for hot_set_size in hot_set_sizes:
-                                for hot_access_probability in hot_access_probabilities:
-                                    for churn_fraction in churn_fractions:
-                                        for overlap in overlaps:
-                                            for object_size_mode in object_size_modes:
-                                                for large_probability in large_object_probabilities:
-                                                    for weight_profile in weight_profiles:
-                                                        for cache_multiplier in cache_multipliers:
-                                                            for bandwidth_level in memory_bandwidth_levels:
-                                                                for base_level in memory_base_latency_levels:
-                                                                    for link_level in link_latency_levels:
-                                                                        name = run_slug(
-                                                                            preset,
-                                                                            policy,
-                                                                            weight_profile,
-                                                                            seed,
-                                                                            node_count,
-                                                                            object_count,
-                                                                            epoch_count,
-                                                                            epoch_length,
-                                                                            hot_set_size,
-                                                                            hot_access_probability,
-                                                                            churn_fraction,
-                                                                            overlap,
-                                                                            object_size_mode,
-                                                                            large_probability,
-                                                                            cache_multiplier,
-                                                                            bandwidth_level,
-                                                                            base_level,
-                                                                            link_level,
-                                                                        )
-                                                                        runs.append(
-                                                                            MatrixRun(
-                                                                                preset=preset,
-                                                                                policy=policy,
-                                                                                contention_weight_profile=weight_profile,
-                                                                                seed=seed,
-                                                                                compute_node_count=node_count,
-                                                                                object_count=object_count,
-                                                                                epoch_count=epoch_count,
-                                                                                requests_per_node_per_epoch=epoch_length,
-                                                                                hot_set_size=hot_set_size,
-                                                                                hot_access_probability=hot_access_probability,
-                                                                                hot_set_churn_fraction=churn_fraction,
-                                                                                cross_node_overlap=overlap,
-                                                                                object_size_mode=object_size_mode,
-                                                                                large_object_probability=large_probability,
-                                                                                cache_capacity_hotset_multiplier=cache_multiplier,
-                                                                                memory_bandwidth_level=bandwidth_level,
-                                                                                memory_base_latency_level=base_level,
-                                                                                link_latency_level=link_level,
-                                                                                run_name=name,
-                                                                                config_path=config_dir / f"{name}.yaml",
-                                                                                output_dir=output_root / name,
-                                                                            )
-                                                                        )
+            runs.append(
+                MatrixRun(
+                    preset=preset,
+                    policy=policy,
+                    contention_weight_profile=weight_profile,
+                    seed=seed,
+                    compute_node_count=node_count,
+                    object_count=object_count,
+                    epoch_count=epoch_count,
+                    requests_per_node_per_epoch=epoch_length,
+                    hot_set_size=hot_set_size,
+                    hot_access_probability=hot_access_probability,
+                    hot_set_churn_fraction=churn_fraction,
+                    cross_node_overlap=overlap,
+                    object_size_mode=object_size_mode,
+                    large_object_probability=large_probability,
+                    cache_capacity_hotset_multiplier=cache_multiplier,
+                    memory_channel_count=memory_channel_count,
+                    hot_object_channel_count=hot_object_channel_count,
+                    memory_bandwidth_level=bandwidth_level,
+                    memory_base_latency_level=base_level,
+                    link_latency_level=link_level,
+                    run_name=name,
+                    config_path=config_dir / f"{name}.yaml",
+                    output_dir=output_root / name,
+                )
+            )
     return runs
 
 
@@ -1363,6 +1532,9 @@ def write_yaml_config(run: MatrixRun) -> None:
         f"  node_id: {preset.memory_node_id}",
         f"  base_latency: {memory_base_latency(run)}",
         f"  bandwidth_bytes_per_time: {memory_bandwidth_bytes_per_time(run)}",
+        "  # Each channel is an independent FIFO service resource; bandwidth",
+        "  # is interpreted per channel when channel_count is greater than one.",
+        f"  channel_count: {run.memory_channel_count}",
         "",
         "link:",
         f"  one_way_latency: {one_way_link_latency(run)}",
@@ -1451,6 +1623,9 @@ def write_yaml_config(run: MatrixRun) -> None:
             f"  object_count: {run.object_count}",
             f"  object_size_bytes: {preset.object_size_bytes}",
             f"  hot_set_churn_fraction: {run.hot_set_churn_fraction:g}",
+            "  # Zero leaves hot objects unrestricted. Positive values create",
+            "  # controlled channel-local hot spots for memory-channel studies.",
+            f"  hot_object_channel_count: {run.hot_object_channel_count}",
             f"  object_size_mode: {run.object_size_mode}",
             f"  object_size_small_bytes: {preset.object_size_small_bytes}",
             f"  object_size_large_bytes: {preset.object_size_large_bytes}",
@@ -1509,6 +1684,8 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
             run.cache_capacity_hotset_multiplier
         ),
         "cache_capacity_bytes": cache_capacity_bytes(run),
+        "memory_channel_count": run.memory_channel_count,
+        "hot_object_channel_count": run.hot_object_channel_count,
         "memory_bandwidth_level": run.memory_bandwidth_level,
         "memory_bandwidth_bytes_per_time": memory_bandwidth_bytes_per_time(run),
         "memory_base_latency_level": run.memory_base_latency_level,
@@ -1565,6 +1742,39 @@ def aggregate_contention(output_dir: Path) -> dict[str, Any]:
                 totals["max_observed_queue_depth"],
                 int(row["max_observed_queue_depth"]),
             )
+    return totals
+
+
+def aggregate_channel_contention(output_dir: Path) -> dict[str, Any]:
+    """Summarize channel-local queue pressure into run-level totals."""
+
+    path = output_dir / "contention_by_channel.csv"
+    totals = {
+        "peak_memory_channel_queue_depth": 0,
+        "max_channel_total_queue_wait": 0,
+        "channel_queue_imbalance": 0.0,
+    }
+    if not path.exists():
+        return {key: "" for key in totals}
+
+    channel_waits: list[float] = []
+    with path.open("r", encoding="utf-8", newline="") as input_file:
+        for row in csv.DictReader(input_file):
+            total_wait = float(row["total_queue_wait"])
+            channel_waits.append(total_wait)
+            totals["peak_memory_channel_queue_depth"] = max(
+                totals["peak_memory_channel_queue_depth"],
+                int(row["max_queue_depth"]),
+            )
+            totals["max_channel_total_queue_wait"] = max(
+                totals["max_channel_total_queue_wait"],
+                total_wait,
+            )
+    if channel_waits and sum(channel_waits) > 0.0:
+        average_wait = sum(channel_waits) / len(channel_waits)
+        totals["channel_queue_imbalance"] = (
+            max(channel_waits) / average_wait
+        )
     return totals
 
 
@@ -1662,6 +1872,25 @@ def summarize_run(run: MatrixRun, status: str, error: str = "") -> dict[str, Any
         }
     )
     row.update(aggregate_contention(run.output_dir))
+    channel_summary = memory.get("channels", {})
+    row.update(
+        {
+            "peak_memory_channel_queue_depth": number_or_blank(
+                channel_summary.get("peak_queue_depth")
+            ),
+            "max_channel_total_queue_wait": number_or_blank(
+                channel_summary.get("max_total_queue_wait")
+            ),
+            "channel_queue_imbalance": number_or_blank(
+                channel_summary.get("queue_imbalance")
+            ),
+        }
+    )
+    # Older outputs will not have memory.channels in summary.json, so fall back
+    # to the CSV when present.
+    for key, value in aggregate_channel_contention(run.output_dir).items():
+        if row.get(key, "") == "":
+            row[key] = value
     return row
 
 
@@ -1724,12 +1953,14 @@ def verify_dry_run(
             f"compute_node_ids: [{', '.join(str(node_id) for node_id in node_ids_for_run(run))}]",
             f"base_latency: {memory_base_latency(run)}",
             f"bandwidth_bytes_per_time: {memory_bandwidth_bytes_per_time(run)}",
+            f"channel_count: {run.memory_channel_count}",
             f"one_way_latency: {one_way_link_latency(run)}",
             f"capacity_bytes: {cache_capacity_bytes(run)}",
             f"object_count: {run.object_count}",
             f"epoch_count: {run.epoch_count}",
             f"hot_set_size: {run.hot_set_size}",
             f"hot_access_probability: {run.hot_access_probability:g}",
+            f"hot_object_channel_count: {run.hot_object_channel_count}",
             "hot_set_churn_fraction:",
             "object_size_mode:",
             "object_size_small_bytes:",
@@ -1823,6 +2054,10 @@ def main() -> int:
         if preset.name == "phase_e"
         else EVAL_CONTENTION_CALIBRATION_POLICIES
         if preset.name == "eval_contention_calibration"
+        else EVAL_CHANNEL_CALIBRATION_POLICIES
+        if preset.name == "eval_channel_calibration"
+        else EVAL_CHANNEL_HOTSPOT_POLICIES
+        if preset.name == "eval_channel_hotspots"
         else EVAL_POLICY_VIABILITY_POLICIES
         if preset.name == "eval_policy_viability"
         else EVAL_INTERACTION_POLICIES
@@ -1890,6 +2125,16 @@ def main() -> int:
         if args.large_object_probabilities is not None
         else list(preset.large_object_probabilities)
     )
+    memory_channel_counts = (
+        parse_positive_ints(args.memory_channel_counts)
+        if args.memory_channel_counts is not None
+        else list(preset.memory_channel_counts)
+    )
+    hot_object_channel_counts = (
+        parse_nonnegative_ints(args.hot_object_channel_counts)
+        if args.hot_object_channel_counts is not None
+        else list(preset.hot_object_channel_counts)
+    )
     cache_multipliers = (
         parse_positive_floats(args.cache_hotset_multipliers,
                               "cache hot-set multiplier")
@@ -1949,6 +2194,8 @@ def main() -> int:
                       object_size_modes,
                       large_object_probabilities,
                       cache_multipliers,
+                      memory_channel_counts,
+                      hot_object_channel_counts,
                       memory_bandwidth_levels,
                       memory_base_latency_levels,
                       link_latency_levels,

@@ -94,9 +94,9 @@ void record_remote_object(Stats& stats,
             8,
             epoch_id,
             static_cast<dm_sim::NodeId>(i + 1));
-        stats.record_remote_access(request, static_cast<std::size_t>(i + 1));
-        stats.record_object_queue_wait(request, queue_wait);
-        stats.record_object_service(request, service_time);
+        stats.record_remote_access(request, 0, static_cast<std::size_t>(i + 1));
+        stats.record_object_queue_wait(request, 0, queue_wait);
+        stats.record_object_service(request, 0, service_time);
     }
 }
 

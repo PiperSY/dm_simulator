@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <unordered_map>
+#include <vector>
 
 #include "metrics/stats.hpp"
 #include "model/request.hpp"
@@ -28,19 +29,26 @@ public:
     void handle_event(const Event& event, Scheduler& scheduler);
 
 private:
+    struct ChannelState {
+        std::deque<RequestId> queued_requests;
+        bool service_in_progress = false;
+        bool service_start_scheduled = false;
+    };
+
     // Handlers for specific event types related to memory access, including forwarding requests to memory, starting memory service, and completing memory service.
     void handle_forward_to_memory(const Event& event, Scheduler& scheduler);
     void handle_memory_service_start(const Event& event, Scheduler& scheduler);
     void handle_memory_service_complete(const Event& event, Scheduler& scheduler);
     [[nodiscard]] SimTime service_time_for(const Request& request) const noexcept;
+    [[nodiscard]] MemoryChannelId channel_for(const Request& request) const noexcept;
+    [[nodiscard]] ChannelState& channel_state(MemoryChannelId channel_id);
+    [[nodiscard]] const ChannelState& channel_state(MemoryChannelId channel_id) const;
 
     NodeId node_id_;
     const SimulationConfig& config_;                            // Reference to the simulation configuration, allowing the MemoryNode to access parameters such as memory latency and bandwidth.
     Stats& stats_;                                              // Reference to the Stats object for recording metrics related to memory access and contention.
     std::unordered_map<RequestId, Request>& request_table_;     // Reference to the global request table, allowing the MemoryNode to access and update request information during event handling.
-    std::deque<RequestId> queued_requests_;                     // Queue of pending requests waiting for memory service, maintained in FIFO order to ensure fair servicing of requests.
-    bool service_in_progress_ = false;                          // Flags to track whether a memory service start event has been scheduled or is in progress, 
-    bool service_start_scheduled_ = false;                      //   preventing multiple concurrent service start events from being scheduled when the queue is not empty.    
+    std::vector<ChannelState> channels_;                        // Independent FIFO service queues, one per modeled memory channel.
 };
 
 }  // namespace dm_sim

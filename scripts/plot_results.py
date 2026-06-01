@@ -52,6 +52,8 @@ GROUP_COLUMNS = (
     "large_object_probability",
     "cache_capacity_hotset_multiplier",
     "cache_capacity_bytes",
+    "memory_channel_count",
+    "hot_object_channel_count",
     "memory_bandwidth_level",
     "memory_bandwidth_bytes_per_time",
     "memory_base_latency_level",
@@ -88,6 +90,9 @@ COMPARISON_COLUMNS = (
     "average_memory_wait_delta_pct",
     "max_memory_wait",
     "peak_memory_queue_depth",
+    "peak_memory_channel_queue_depth",
+    "max_channel_total_queue_wait",
+    "channel_queue_imbalance",
     "total_remote_accesses",
     "baseline_total_remote_accesses",
     "total_remote_accesses_delta",
@@ -177,6 +182,8 @@ CONDITION_DIMENSIONS = (
     "contention_weight_profile",
     "contention_weight_name",
     "contention_weight_value",
+    "memory_channel_count",
+    "hot_object_channel_count",
     "memory_bandwidth_level",
     "node_count",
 )
@@ -366,7 +373,7 @@ def detect_report_mode(rows: list[dict[str, str]], requested: str) -> str:
     if len(presets) != 1:
         return "generic"
     preset = presets[0]
-    if preset == "eval_contention_calibration":
+    if preset == "eval_contention_calibration" or preset.startswith("eval_channel_"):
         return "contention_calibration"
     if preset == "eval_policy_viability":
         return "policy_viability"
@@ -550,6 +557,10 @@ def build_policy_comparison(rows: list[dict[str, str]],
         memory_wait = metric(row, "average_memory_wait")
         max_memory_wait = metric(row, "max_memory_wait")
         peak_queue_depth = metric(row, "peak_memory_queue_depth")
+        peak_channel_queue_depth = metric(row,
+                                          "peak_memory_channel_queue_depth")
+        max_channel_queue_wait = metric(row, "max_channel_total_queue_wait")
+        channel_imbalance = metric(row, "channel_queue_imbalance")
         remote_accesses = metric(row, "total_remote_accesses")
         total_queue_wait = metric(row, "total_queue_wait")
         total_service_time = metric(row, "total_remote_service_time")
@@ -600,6 +611,9 @@ def build_policy_comparison(rows: list[dict[str, str]],
                                                              baseline_wait),
                 "max_memory_wait": max_memory_wait,
                 "peak_memory_queue_depth": peak_queue_depth,
+                "peak_memory_channel_queue_depth": peak_channel_queue_depth,
+                "max_channel_total_queue_wait": max_channel_queue_wait,
+                "channel_queue_imbalance": channel_imbalance,
                 "total_remote_accesses": remote_accesses,
                 "baseline_total_remote_accesses": baseline_remote,
                 "total_remote_accesses_delta": absolute_delta(remote_accesses,
@@ -1371,6 +1385,87 @@ def calibration_hotness_memory_pressure_heatmap(
     )
 
 
+def calibration_channel_count_pressure_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot how memory-channel parallelism changes bottleneck pressure."""
+
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "memory_channel_count",
+        [
+            ("average_memory_wait", "Average memory wait", 1.0),
+            ("total_queue_wait", "Total queue wait", 1.0),
+            ("peak_memory_channel_queue_depth",
+             "Peak channel queue depth",
+             1.0),
+            ("channel_queue_imbalance", "Channel queue imbalance", 1.0),
+        ],
+        "Memory pressure as channel parallelism changes",
+        "Memory channel count",
+    )
+
+
+def calibration_channel_hotspot_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot how concentrating hot objects onto fewer channels changes pressure."""
+
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "hot_object_channel_count",
+        [
+            ("average_memory_wait", "Average memory wait", 1.0),
+            ("peak_memory_channel_queue_depth",
+             "Peak channel queue depth",
+             1.0),
+            ("max_channel_total_queue_wait",
+             "Max channel total queue wait",
+             1.0),
+            ("channel_queue_imbalance", "Channel queue imbalance", 1.0),
+        ],
+        "Channel-local hotspot pressure",
+        "Hot-object channel count (0 = unrestricted)",
+    )
+
+
+def calibration_channel_pressure_heatmap(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Show channel pressure across channel-count and hotspot dimensions."""
+
+    # Channel plots distinguish global-looking memory pressure from localized
+    # resource pressure by averaging over policy and non-axis dimensions.
+    return policy_averaged_panel_heatmap(
+        plt,
+        comparison_rows,
+        [
+            (
+                "memory_channel_count",
+                "hot_object_channel_count",
+                "average_memory_wait",
+                "Average memory wait",
+                "Memory channel count",
+                "Hot-object channel count",
+            ),
+            (
+                "memory_channel_count",
+                "hot_object_channel_count",
+                "peak_memory_channel_queue_depth",
+                "Peak channel queue depth",
+                "Memory channel count",
+                "Hot-object channel count",
+            ),
+        ],
+        "Channel-local memory pressure",
+    )
+
+
 def summarize_object_concentration(
     contention_rows: list[dict[str, str]],
     top_k: int = 5,
@@ -2020,6 +2115,36 @@ def generate_contention_calibration_plots(
                     "Memory bandwidth pressure",
                     "Memory bandwidth level",
                     numeric_x=False,
+                ),
+            )
+        )
+    if "memory_channel_count" in swept:
+        plot_specs.append(
+            (
+                "calibration_channel_count_pressure",
+                calibration_channel_count_pressure_plot(
+                    plt,
+                    comparison_rows,
+                ),
+            )
+        )
+    if "hot_object_channel_count" in swept:
+        plot_specs.append(
+            (
+                "calibration_channel_hotspot_pressure",
+                calibration_channel_hotspot_plot(
+                    plt,
+                    comparison_rows,
+                ),
+            )
+        )
+    if {"memory_channel_count", "hot_object_channel_count"}.issubset(swept):
+        plot_specs.append(
+            (
+                "calibration_channel_pressure_heatmap",
+                calibration_channel_pressure_heatmap(
+                    plt,
+                    comparison_rows,
                 ),
             )
         )

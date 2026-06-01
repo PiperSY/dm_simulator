@@ -654,6 +654,73 @@ void test_contention_tracks_service_time_by_object_size() {
     assert(large_object->bytes_served == 24);
 }
 
+void test_multi_channel_same_channel_requests_queue() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{1, {RequestSpec{1, 8, 0}}},
+        ComputeNodeConfig{2, {RequestSpec{3, 8, 0}}},
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 0;
+    config.memory_base_latency = 10;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.memory_channel_count = 2;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 2);
+    assert(simulator.stats().total_memory_wait() > 0);
+    assert(simulator.stats().peak_memory_channel_queue_depth() == 2);
+
+    const std::optional<dm_sim::ChannelContentionStats> channel_zero =
+        simulator.stats().channel_contention(0, 0);
+    assert(channel_zero.has_value());
+    assert(channel_zero->remote_accesses == 2);
+    assert(channel_zero->total_queue_wait > 0);
+}
+
+void test_multi_channel_different_channel_requests_run_concurrently() {
+    SimulationConfig config;
+    config.compute_nodes = {
+        ComputeNodeConfig{1, {RequestSpec{1, 8, 0}}},
+        ComputeNodeConfig{2, {RequestSpec{2, 8, 0}}},
+    };
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 0;
+    config.memory_base_latency = 10;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.memory_channel_count = 2;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    assert(simulator.stats().completed_requests() == 2);
+    assert(simulator.stats().total_memory_wait() == 0);
+    assert(simulator.stats().peak_memory_channel_queue_depth() == 1);
+
+    const std::optional<dm_sim::ChannelContentionStats> channel_zero =
+        simulator.stats().channel_contention(0, 0);
+    const std::optional<dm_sim::ChannelContentionStats> channel_one =
+        simulator.stats().channel_contention(0, 1);
+    assert(channel_zero.has_value());
+    assert(channel_one.has_value());
+    assert(channel_zero->remote_accesses == 1);
+    assert(channel_one->remote_accesses == 1);
+    assert(channel_zero->total_queue_wait == 0);
+    assert(channel_one->total_queue_wait == 0);
+}
+
 void test_contention_separates_epoch_shifted_requests() {
     SimulationConfig config;
     config.compute_nodes = {
@@ -867,6 +934,8 @@ int main() {
     test_global_hottest_replication_requires_synthetic_workload();
     test_contention_tracks_distinct_requester_overlap();
     test_contention_tracks_service_time_by_object_size();
+    test_multi_channel_same_channel_requests_queue();
+    test_multi_channel_different_channel_requests_run_concurrently();
     test_contention_separates_epoch_shifted_requests();
     test_global_epoch_barrier_waits_for_prior_epoch_completion();
     test_contention_aware_uses_previous_epoch_and_hits_after_admission();

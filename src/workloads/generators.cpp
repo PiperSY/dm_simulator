@@ -90,6 +90,52 @@ std::vector<ObjectId> make_object_universe(std::uint64_t object_count) {
     return objects;
 }
 
+std::uint64_t effective_hot_object_channel_count(
+    const SyntheticWorkloadConfig& config) {
+    return config.hot_object_channel_count == 0
+               ? config.memory_channel_count
+               : config.hot_object_channel_count;
+}
+
+std::size_t eligible_hot_object_count(
+    const SyntheticWorkloadConfig& config) {
+    const std::uint64_t channel_limit =
+        effective_hot_object_channel_count(config);
+    std::size_t count = 0;
+    for (ObjectId object_id = 1; object_id <= config.object_count; ++object_id) {
+        if (memory_channel_for_object(object_id,
+                                      config.memory_channel_count) <
+            channel_limit) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Hotspot experiments restrict only hot-set allocation. Cold accesses still use
+// the full object universe, so this knob creates channel-local pressure without
+// changing object placement or cache policy behavior.
+std::vector<ObjectId> eligible_hot_objects(
+    const SyntheticWorkloadConfig& config,
+    const std::vector<ObjectId>& shuffled_objects) {
+    const std::uint64_t channel_limit =
+        effective_hot_object_channel_count(config);
+    if (channel_limit == config.memory_channel_count) {
+        return shuffled_objects;
+    }
+
+    std::vector<ObjectId> eligible;
+    eligible.reserve(eligible_hot_object_count(config));
+    for (ObjectId object_id : shuffled_objects) {
+        if (memory_channel_for_object(object_id,
+                                      config.memory_channel_count) <
+            channel_limit) {
+            eligible.push_back(object_id);
+        }
+    }
+    return eligible;
+}
+
 // Wraps object selection so shifted epochs can cycle through the universe.
 ObjectId object_at(const std::vector<ObjectId>& objects, std::size_t index) {
     return objects[index % objects.size()];
@@ -346,6 +392,17 @@ void validate_synthetic_workload_config(const SyntheticWorkloadConfig& config) {
         throw std::invalid_argument("Synthetic workload object_count must be positive");
     }
 
+    if (config.memory_channel_count == 0) {
+        throw std::invalid_argument(
+            "Synthetic workload memory_channel_count must be positive");
+    }
+
+    if (config.hot_object_channel_count > config.memory_channel_count) {
+        throw std::invalid_argument(
+            "Synthetic workload hot_object_channel_count must not exceed "
+            "memory_channel_count");
+    }
+
     if (config.object_size_bytes == 0) {
         throw std::invalid_argument(
             "Synthetic workload object_size_bytes must be positive");
@@ -402,9 +459,11 @@ void validate_synthetic_workload_config(const SyntheticWorkloadConfig& config) {
             "Synthetic workload large_object_probability must be in [0, 1]");
     }
 
-    if (required_hot_objects_per_epoch(config) > config.object_count) {
+    const std::size_t eligible_count = eligible_hot_object_count(config);
+    if (required_hot_objects_per_epoch(config) > eligible_count) {
         throw std::invalid_argument(
-            "Synthetic workload object_count is too small for requested overlap");
+            "Synthetic workload has too few hot-channel-eligible objects for "
+            "requested overlap");
     }
 
     // Full churn can cycle through the object universe, but partial churn
@@ -415,10 +474,10 @@ void validate_synthetic_workload_config(const SyntheticWorkloadConfig& config) {
         const std::size_t required_objects =
             required_hot_objects_per_epoch(config) +
             total_replacements_per_epoch(config, churn_fraction);
-        if (required_objects > config.object_count) {
+        if (required_objects > eligible_count) {
             throw std::invalid_argument(
-                "Synthetic workload object_count is too small for requested "
-                "partial hot-set churn");
+                "Synthetic workload has too few hot-channel-eligible objects "
+                "for requested partial hot-set churn");
         }
     }
 
@@ -441,6 +500,8 @@ GeneratedWorkload generate_synthetic_workload(
     std::mt19937_64 rng(config.seed);
     std::vector<ObjectId> objects = make_object_universe(config.object_count);
     std::shuffle(objects.begin(), objects.end(), rng);
+    const std::vector<ObjectId> hot_object_candidates =
+        eligible_hot_objects(config, objects);
     const std::vector<std::uint64_t> object_sizes =
         object_sizes_by_id(config);
 
@@ -464,18 +525,22 @@ GeneratedWorkload generate_synthetic_workload(
         // the layout unchanged when effective churn is zero.
         if (epoch_id == 0) {
             hot_set_segments =
-                allocate_hot_set_segments(config, objects, object_cursor);
+                allocate_hot_set_segments(config,
+                                          hot_object_candidates,
+                                          object_cursor);
         } else if (churn_fraction >= 1.0) {
             // Preserve the original full-shift behavior exactly: each epoch
             // starts at the next stride in the shuffled object universe.
             object_cursor =
                 (static_cast<std::size_t>(epoch_id) * epoch_stride) %
-                objects.size();
+                hot_object_candidates.size();
             hot_set_segments =
-                allocate_hot_set_segments(config, objects, object_cursor);
+                allocate_hot_set_segments(config,
+                                          hot_object_candidates,
+                                          object_cursor);
         } else if (churn_fraction > 0.0) {
             hot_set_segments = churn_hot_set_segments(hot_set_segments,
-                                                      objects,
+                                                      hot_object_candidates,
                                                       object_cursor,
                                                       churn_fraction);
         }

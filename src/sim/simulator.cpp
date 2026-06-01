@@ -115,12 +115,20 @@ GlobalReplicaPlan build_global_replica_plan(
 Simulator::Simulator(SimulationConfig config)
     : config_(std::move(config)),
       memory_node_(config_.memory_node_id, config_, stats_, request_table_) {
+    if (config_.memory_channel_count == 0) {
+        throw std::invalid_argument("memory_channel_count must be greater than zero");
+    }
+
     if (config_.synthetic_workload.has_value()) {
         if (!config_.compute_nodes.empty()) {
             throw std::invalid_argument(
                 "Use either synthetic_workload or explicit compute_nodes, not both");
         }
 
+        // Channel count lives in memory config, but workload generation needs
+        // it when hot objects are intentionally restricted to channel subsets.
+        config_.synthetic_workload->memory_channel_count =
+            config_.memory_channel_count;
         generated_workload_ =
             generate_synthetic_workload(*config_.synthetic_workload);
         config_.compute_nodes.reserve(generated_workload_->node_workloads.size());

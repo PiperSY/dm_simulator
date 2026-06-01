@@ -21,6 +21,7 @@ using dm_sim::ObjectSizeMode;
 using dm_sim::RequestSpec;
 using dm_sim::SyntheticWorkloadConfig;
 using dm_sim::WorkloadCursor;
+using dm_sim::memory_channel_for_object;
 
 SyntheticWorkloadConfig make_config() {
     SyntheticWorkloadConfig config;
@@ -357,6 +358,47 @@ void test_bimodal_sizes_are_per_object_and_do_not_change_access_order() {
     assert(saw_large);
 }
 
+void test_hot_object_channel_restriction_places_hot_sets_on_selected_channels() {
+    SyntheticWorkloadConfig config = make_config();
+    config.compute_node_ids = {1, 2};
+    config.object_count = 64;
+    config.memory_channel_count = 4;
+    config.hot_object_channel_count = 1;
+    config.hot_set_size = 4;
+    config.epoch_count = 3;
+    config.hot_set_mode = HotSetMode::EpochShift;
+    config.hot_set_churn_fraction = 0.5;
+    config.cross_node_overlap = CrossNodeOverlap::High;
+
+    const GeneratedWorkload workload = generate_synthetic_workload(config);
+
+    for (const EpochHotSetMetadata& epoch_metadata : workload.epochs) {
+        for (NodeId node_id : config.compute_node_ids) {
+            for (ObjectId object_id : hot_set_for_node(epoch_metadata, node_id)) {
+                assert(memory_channel_for_object(object_id,
+                                                 config.memory_channel_count) ==
+                       0);
+            }
+        }
+    }
+}
+
+void test_hot_object_channel_restriction_validates_available_objects() {
+    SyntheticWorkloadConfig config = make_config();
+    config.compute_node_ids = {1, 2};
+    config.object_count = 16;
+    config.memory_channel_count = 4;
+    config.hot_object_channel_count = 1;
+    config.hot_set_size = 8;
+    config.cross_node_overlap = CrossNodeOverlap::High;
+
+    try {
+        (void)generate_synthetic_workload(config);
+        assert(false);
+    } catch (const std::invalid_argument&) {
+    }
+}
+
 void test_workload_cursor_issues_requests_in_order() {
     std::vector<RequestSpec> requests{
         RequestSpec{101, 8, 0},
@@ -395,6 +437,8 @@ int main() {
     test_partial_churn_preserves_overlap_presets();
     test_generated_request_counts_and_epochs();
     test_bimodal_sizes_are_per_object_and_do_not_change_access_order();
+    test_hot_object_channel_restriction_places_hot_sets_on_selected_channels();
+    test_hot_object_channel_restriction_validates_available_objects();
     test_workload_cursor_issues_requests_in_order();
     return 0;
 }

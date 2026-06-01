@@ -13,7 +13,8 @@ MemoryNode::MemoryNode(NodeId node_id,
     : node_id_(node_id),
       config_(config),
       stats_(stats),
-      request_table_(request_table) {}
+      request_table_(request_table),
+      channels_(static_cast<std::size_t>(config.memory_channel_count)) {}
 
 void MemoryNode::handle_event(const Event& event, Scheduler& scheduler) {
     switch (event.type) {
@@ -34,39 +35,49 @@ void MemoryNode::handle_event(const Event& event, Scheduler& scheduler) {
 void MemoryNode::handle_forward_to_memory(const Event& event,
                                           Scheduler& scheduler) {
     Request& request = request_table_.at(event.request_id);
-    request.memory_enqueue_time = event.time;
-    queued_requests_.push_back(event.request_id);
-    stats_.observe_memory_queue_depth(queued_requests_.size());
-    stats_.record_remote_access(request, queued_requests_.size());
+    const MemoryChannelId channel_id = channel_for(request);
+    ChannelState& channel = channel_state(channel_id);
 
-    if (!service_in_progress_ && !service_start_scheduled_) {
-        service_start_scheduled_ = true;
+    request.memory_enqueue_time = event.time;
+    channel.queued_requests.push_back(event.request_id);
+    stats_.observe_memory_queue_depth(channel.queued_requests.size());
+    stats_.record_remote_access(request,
+                                channel_id,
+                                channel.queued_requests.size());
+
+    // Channels are independent FIFO servers. This models memory-resource
+    // parallelism without pretending to simulate a full fabric or bank model.
+    if (!channel.service_in_progress && !channel.service_start_scheduled) {
+        channel.service_start_scheduled = true;
         scheduler.schedule(Event(event.time,
                                  EventType::MemoryServiceStart,
                                  node_id_,
-                                 queued_requests_.front()));
+                                 channel.queued_requests.front()));
     }
 }
 
 void MemoryNode::handle_memory_service_start(const Event& event,
                                              Scheduler& scheduler) {
-    if (queued_requests_.empty()) {
+    Request& request = request_table_.at(event.request_id);
+    const MemoryChannelId channel_id = channel_for(request);
+    ChannelState& channel = channel_state(channel_id);
+
+    if (channel.queued_requests.empty()) {
         throw std::logic_error("Memory service started with empty queue");
     }
 
-    if (queued_requests_.front() != event.request_id) {
+    if (channel.queued_requests.front() != event.request_id) {
         throw std::logic_error("Memory service started out of FIFO order");
     }
 
-    Request& request = request_table_.at(event.request_id);
-    queued_requests_.pop_front();
-    service_start_scheduled_ = false;
-    service_in_progress_ = true;
+    channel.queued_requests.pop_front();
+    channel.service_start_scheduled = false;
+    channel.service_in_progress = true;
     request.current_stage = RequestStage::WaitingForResponse;
 
     const SimTime wait_time = event.time - request.memory_enqueue_time;
     stats_.record_memory_wait(wait_time);
-    stats_.record_object_queue_wait(request, wait_time);
+    stats_.record_object_queue_wait(request, channel_id, wait_time);
 
     scheduler.schedule(Event(event.time + service_time_for(request),
                              EventType::MemoryServiceComplete,
@@ -76,26 +87,29 @@ void MemoryNode::handle_memory_service_start(const Event& event,
 
 void MemoryNode::handle_memory_service_complete(const Event& event,
                                                 Scheduler& scheduler) {
-    if (!service_in_progress_) {
+    const Request& request = request_table_.at(event.request_id);
+    const MemoryChannelId channel_id = channel_for(request);
+    ChannelState& channel = channel_state(channel_id);
+
+    if (!channel.service_in_progress) {
         throw std::logic_error("Memory service completed without active request");
     }
 
-    service_in_progress_ = false;
+    channel.service_in_progress = false;
 
-    const Request& request = request_table_.at(event.request_id);
-    stats_.record_object_service(request, service_time_for(request));
+    stats_.record_object_service(request, channel_id, service_time_for(request));
 
     scheduler.schedule(Event(event.time + config_.one_way_link_latency,
                              EventType::ReturnResponse,
                              request.source_node_id,
                              request.request_id));
 
-    if (!queued_requests_.empty()) {
-        service_start_scheduled_ = true;
+    if (!channel.queued_requests.empty()) {
+        channel.service_start_scheduled = true;
         scheduler.schedule(Event(event.time,
                                  EventType::MemoryServiceStart,
                                  node_id_,
-                                 queued_requests_.front()));
+                                 channel.queued_requests.front()));
     }
 }
 
@@ -105,6 +119,21 @@ SimTime MemoryNode::service_time_for(const Request& request) const noexcept {
         static_cast<SimTime>((request.size_bytes + bandwidth - 1) / bandwidth);
 
     return config_.memory_base_latency + serialization_delay;
+}
+
+MemoryChannelId MemoryNode::channel_for(const Request& request) const noexcept {
+    return memory_channel_for_object(request.object_id,
+                                     config_.memory_channel_count);
+}
+
+MemoryNode::ChannelState& MemoryNode::channel_state(
+    MemoryChannelId channel_id) {
+    return channels_.at(static_cast<std::size_t>(channel_id));
+}
+
+const MemoryNode::ChannelState& MemoryNode::channel_state(
+    MemoryChannelId channel_id) const {
+    return channels_.at(static_cast<std::size_t>(channel_id));
 }
 
 }  // namespace dm_sim

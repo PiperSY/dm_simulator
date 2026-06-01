@@ -99,19 +99,20 @@ void test_contention_aggregation_records_remote_signals() {
     dm_sim::Stats stats;
 
     const dm_sim::Request first = make_request(1, 1, 9001, 0, 16);
-    stats.record_remote_access(first, 1);
-    stats.record_object_queue_wait(first, 0);
-    stats.record_object_service(first, 7);
+    stats.record_remote_access(first, 0, 1);
+    stats.record_object_queue_wait(first, 0, 0);
+    stats.record_object_service(first, 0, 7);
 
     const dm_sim::Request second = make_request(2, 2, 9001, 0, 16);
-    stats.record_remote_access(second, 2);
-    stats.record_object_queue_wait(second, 5);
-    stats.record_object_service(second, 7);
+    stats.record_remote_access(second, 0, 2);
+    stats.record_object_queue_wait(second, 0, 5);
+    stats.record_object_service(second, 0, 7);
 
     const std::optional<dm_sim::ObjectContentionStats> object_stats =
         stats.object_contention(0, 9001);
     assert(object_stats.has_value());
     assert(object_stats->remote_accesses == 2);
+    assert(object_stats->memory_channel_id == 0);
     assert(object_stats->distinct_requesters == 2);
     assert(object_stats->bytes_served == 32);
     assert(object_stats->total_remote_service_time == 14);
@@ -120,11 +121,20 @@ void test_contention_aggregation_records_remote_signals() {
     assert(object_stats->queue_wait_samples == 2);
     assert(object_stats->max_observed_queue_depth == 2);
     assert(near(object_stats->average_queue_wait, 2.5));
+    const std::optional<dm_sim::ChannelContentionStats> channel_stats =
+        stats.channel_contention(0, 0);
+    assert(channel_stats.has_value());
+    assert(channel_stats->remote_accesses == 2);
+    assert(channel_stats->bytes_served == 32);
+    assert(channel_stats->total_remote_service_time == 14);
+    assert(channel_stats->total_queue_wait == 5);
+    assert(channel_stats->max_queue_depth == 2);
+    assert(near(channel_stats->average_queue_wait, 2.5));
 
     const dm_sim::Request next_epoch = make_request(3, 1, 9001, 1, 16);
-    stats.record_remote_access(next_epoch, 1);
-    stats.record_object_queue_wait(next_epoch, 0);
-    stats.record_object_service(next_epoch, 7);
+    stats.record_remote_access(next_epoch, 0, 1);
+    stats.record_object_queue_wait(next_epoch, 0, 0);
+    stats.record_object_service(next_epoch, 0, 7);
 
     assert(stats.contention_by_epoch(0).size() == 1);
     assert(stats.contention_by_epoch(1).size() == 1);
@@ -132,6 +142,7 @@ void test_contention_aggregation_records_remote_signals() {
     assert(stats.previous_epoch_contention(1).size() == 1);
     assert(stats.previous_epoch_object_contention(1, 9001).has_value());
     assert(stats.all_contention_stats().size() == 2);
+    assert(stats.all_channel_contention_stats().size() == 2);
 
     const std::vector<dm_sim::ObjectContentionStats> top_by_wait =
         stats.top_contention_objects(dm_sim::ContentionSortKey::TotalQueueWait, 1);

@@ -18,6 +18,7 @@ namespace dm_sim {
 struct ObjectContentionStats {
     EpochId epoch_id = 0;
     ObjectId object_id = 0;
+    MemoryChannelId memory_channel_id = 0;
     std::size_t remote_accesses = 0;            // Total number of remote accesses for this object during the epoch.
     std::size_t distinct_requesters = 0;        // Number of unique compute nodes that requested this object, indicating the breadth of contention across the system.
     std::uint64_t bytes_served = 0;             // Total bytes served for this object during the epoch, providing insight into the volume of data involved in the contention.   
@@ -26,6 +27,19 @@ struct ObjectContentionStats {
     SimTime max_queue_wait = 0;
     std::size_t queue_wait_samples = 0;         // Number of samples taken for queue wait times, used to calculate average queue wait time for this object during the epoch.
     std::size_t max_observed_queue_depth = 0;   // Maximum observed depth of the memory request queue for this object during the epoch, which can indicate periods of high contention and potential bottlenecks.
+    double average_queue_wait = 0.0;
+};
+
+struct ChannelContentionStats {
+    EpochId epoch_id = 0;
+    MemoryChannelId memory_channel_id = 0;
+    std::size_t remote_accesses = 0;
+    std::uint64_t bytes_served = 0;
+    SimTime total_remote_service_time = 0;
+    SimTime total_queue_wait = 0;
+    SimTime max_queue_wait = 0;
+    std::size_t queue_wait_samples = 0;
+    std::size_t max_queue_depth = 0;
     double average_queue_wait = 0.0;
 };
 
@@ -52,9 +66,14 @@ public:
     // Records a cache miss for the specified node ID, updating total misses and per-node cache statistics.
     void record_cache_miss(NodeId node_id);
     void record_remote_access(const Request& request,
+                              MemoryChannelId memory_channel_id,
                               std::size_t observed_queue_depth);
-    void record_object_queue_wait(const Request& request, SimTime wait_time);
-    void record_object_service(const Request& request, SimTime service_time);
+    void record_object_queue_wait(const Request& request,
+                                  MemoryChannelId memory_channel_id,
+                                  SimTime wait_time);
+    void record_object_service(const Request& request,
+                               MemoryChannelId memory_channel_id,
+                               SimTime service_time);
 
     // Getters for various statistics, including total requests, completed requests, total and average latency, 
     //   memory wait times, and cache hit/miss counts and rates.
@@ -71,6 +90,7 @@ public:
     [[nodiscard]] double average_memory_wait() const noexcept;
     [[nodiscard]] SimTime max_memory_wait() const noexcept;
     [[nodiscard]] std::size_t peak_memory_queue_depth() const noexcept;
+    [[nodiscard]] std::size_t peak_memory_channel_queue_depth() const noexcept;
     [[nodiscard]] std::size_t local_cache_hits() const noexcept;
     [[nodiscard]] std::size_t local_cache_misses() const noexcept;
     [[nodiscard]] double local_cache_hit_rate() const noexcept;
@@ -92,6 +112,13 @@ public:
     [[nodiscard]] std::vector<ObjectContentionStats> top_contention_objects(
         ContentionSortKey sort_key,
         std::size_t limit) const;
+    [[nodiscard]] std::optional<ChannelContentionStats> channel_contention(
+        EpochId epoch_id,
+        MemoryChannelId memory_channel_id) const;
+    [[nodiscard]] std::vector<ChannelContentionStats> channel_contention_by_epoch(
+        EpochId epoch_id) const;
+    [[nodiscard]] std::vector<ChannelContentionStats> all_channel_contention_stats()
+        const;
 
 private:
     // Internal structures for tracking per-node latency and cache statistics.
@@ -109,12 +136,21 @@ private:
         ObjectContentionStats stats;
         std::unordered_set<NodeId> requesters;
     };
+    struct InternalChannelContentionStats {
+        ChannelContentionStats stats;
+    };
     // Helper method to retrieve the contention bucket for a given request, allowing for updates to contention statistics based on the request's epoch and object ID.
     [[nodiscard]] InternalObjectContentionStats& contention_bucket(
-        const Request& request);
+        const Request& request,
+        MemoryChannelId memory_channel_id);
+    [[nodiscard]] InternalChannelContentionStats& channel_bucket(
+        EpochId epoch_id,
+        MemoryChannelId memory_channel_id);
     // Helper method to create a snapshot of the contention statistics for an object, converting from the internal structure to the public ObjectContentionStats structure for reporting and analysis.
     [[nodiscard]] static ObjectContentionStats snapshot_contention(
         const InternalObjectContentionStats& internal_stats);
+    [[nodiscard]] static ChannelContentionStats snapshot_channel_contention(
+        const InternalChannelContentionStats& internal_stats);
 
     // Total counts and aggregates for requests, latency, memory waits, and cache performance.
     SimTime total_latency_ = 0;
@@ -124,6 +160,7 @@ private:
     SimTime max_memory_wait_ = 0;
     std::size_t memory_wait_samples_ = 0;
     std::size_t peak_memory_queue_depth_ = 0;
+    std::size_t peak_memory_channel_queue_depth_ = 0;
     std::size_t local_cache_hits_ = 0;
     std::size_t local_cache_misses_ = 0;
     // Per-node cache statistics for hits and misses, allowing for analysis of cache performance on a per-node basis.
@@ -131,6 +168,8 @@ private:
     // Contention statistics organized by epoch and object ID.
     std::unordered_map<EpochId, std::unordered_map<ObjectId, InternalObjectContentionStats>>
         contention_by_epoch_;
+    std::unordered_map<EpochId, std::unordered_map<MemoryChannelId, InternalChannelContentionStats>>
+        channel_contention_by_epoch_;
 };
 
 }  // namespace dm_sim

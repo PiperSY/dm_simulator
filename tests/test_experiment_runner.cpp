@@ -78,6 +78,7 @@ void test_runner_writes_expected_outputs() {
     assert(std::filesystem::exists(output_dir / "per_node.csv"));
     assert(std::filesystem::exists(output_dir / "latencies.csv"));
     assert(std::filesystem::exists(output_dir / "contention_by_object.csv"));
+    assert(std::filesystem::exists(output_dir / "contention_by_channel.csv"));
     assert(std::filesystem::exists(output_dir / "policy_diagnostics.csv"));
     assert(std::filesystem::exists(output_dir / "cache_admissions.csv"));
     assert(std::filesystem::exists(output_dir / "epoch_diagnostics.csv"));
@@ -88,6 +89,7 @@ void test_runner_writes_expected_outputs() {
            std::string::npos);
     assert(summary_json.find("\"completed_requests\": 4") != std::string::npos);
     assert(summary_json.find("\"latency\"") != std::string::npos);
+    assert(summary_json.find("\"channels\"") != std::string::npos);
     assert(summary_json.find("\"contention\"") != std::string::npos);
     assert(summary_json.find("\"top_by_queue_wait\"") != std::string::npos);
     assert(summary_json.find("\"policy\"") != std::string::npos);
@@ -99,6 +101,7 @@ void test_runner_writes_expected_outputs() {
     assert(line_count(output_dir / "per_node.csv") == 3);
     assert(line_count(output_dir / "latencies.csv") == 5);
     assert(line_count(output_dir / "contention_by_object.csv") == 2);
+    assert(line_count(output_dir / "contention_by_channel.csv") == 2);
     assert(line_count(output_dir / "policy_diagnostics.csv") == 1);
     assert(line_count(output_dir / "cache_admissions.csv") == 3);
     assert(line_count(output_dir / "epoch_diagnostics.csv") == 1);

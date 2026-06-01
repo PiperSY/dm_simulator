@@ -72,6 +72,7 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     assert(simulation.memory_node_id == 99);
     assert(simulation.memory_base_latency == 20);
     assert(simulation.memory_bandwidth_bytes_per_time == 16);
+    assert(simulation.memory_channel_count == 1);
     assert(simulation.one_way_link_latency == 5);
     assert(simulation.local_cache.capacity_bytes == 128);
     assert(simulation.local_cache.hit_latency == 1);
@@ -82,6 +83,8 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     assert(workload.seed == 123);
     assert((workload.compute_node_ids == std::vector<dm_sim::NodeId>{1, 2}));
     assert(workload.object_count == 32);
+    assert(workload.memory_channel_count == 1);
+    assert(workload.hot_object_channel_count == 0);
     assert(workload.object_size_bytes == 16);
     assert(workload.hot_set_churn_fraction == 1.0);
     assert(workload.object_size_mode == ObjectSizeMode::Fixed);
@@ -95,6 +98,28 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     const SimulationConfig loaded_simulation =
         dm_sim::load_simulation_config(path.string());
     assert(loaded_simulation.memory_node_id == 99);
+}
+
+void test_memory_channels_and_hotspot_fields_parse() {
+    std::string config = valid_config_text();
+    config.replace(config.find("bandwidth_bytes_per_time: 16"),
+                   std::string("bandwidth_bytes_per_time: 16").size(),
+                   "bandwidth_bytes_per_time: 16\n"
+                   "  channel_count: 4");
+    config.replace(config.find("object_size_bytes: 16"),
+                   std::string("object_size_bytes: 16").size(),
+                   "object_size_bytes: 16\n"
+                   "  hot_object_channel_count: 2");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_channel_config.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+
+    assert(experiment.simulation.memory_channel_count == 4);
+    const auto& workload = *experiment.simulation.synthetic_workload;
+    assert(workload.memory_channel_count == 4);
+    assert(workload.hot_object_channel_count == 2);
 }
 
 void test_phase_b_workload_fields_parse() {
@@ -509,6 +534,49 @@ void test_invalid_phase_b_workload_fields_fail() {
     }
 }
 
+void test_invalid_channel_fields_fail() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("bandwidth_bytes_per_time: 16"),
+                       std::string("bandwidth_bytes_per_time: 16").size(),
+                       "bandwidth_bytes_per_time: 16\n"
+                       "  channel_count: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_channel_count.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("memory.channel_count") != std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("bandwidth_bytes_per_time: 16"),
+                       std::string("bandwidth_bytes_per_time: 16").size(),
+                       "bandwidth_bytes_per_time: 16\n"
+                       "  channel_count: 2");
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  hot_object_channel_count: 3");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_hot_channel_count.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.hot_object_channel_count") !=
+                   std::string::npos);
+        }
+    }
+}
+
 void test_missing_required_field_fails() {
     const std::filesystem::path path =
         write_temp_config("dm_sim_missing_config.yaml", R"(experiment:
@@ -546,6 +614,7 @@ void test_invalid_enum_value_fails() {
 
 int main() {
     test_valid_yaml_loads_experiment_and_simulation_config();
+    test_memory_channels_and_hotspot_fields_parse();
     test_phase_b_workload_fields_parse();
     test_enum_strings_parse();
     test_phase6_policy_strings_parse();
@@ -555,6 +624,7 @@ int main() {
     test_invalid_contention_policy_config_fails();
     test_invalid_phase_e_contention_variant_fields_fail();
     test_invalid_phase_b_workload_fields_fail();
+    test_invalid_channel_fields_fail();
     test_missing_required_field_fails();
     test_invalid_enum_value_fails();
     return 0;

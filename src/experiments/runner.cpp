@@ -234,6 +234,35 @@ double value_spread(const std::vector<double>& values) {
     return *maximum - *minimum;
 }
 
+SimTime max_channel_total_queue_wait(
+    const std::vector<ChannelContentionStats>& channels) {
+    SimTime maximum = 0;
+    for (const ChannelContentionStats& channel : channels) {
+        maximum = std::max(maximum, channel.total_queue_wait);
+    }
+    return maximum;
+}
+
+double channel_queue_imbalance(
+    const std::vector<ChannelContentionStats>& channels) {
+    if (channels.empty()) {
+        return 0.0;
+    }
+
+    const SimTime maximum = max_channel_total_queue_wait(channels);
+    SimTime total = 0;
+    for (const ChannelContentionStats& channel : channels) {
+        total += channel.total_queue_wait;
+    }
+    if (total == 0) {
+        return 0.0;
+    }
+
+    const double average =
+        static_cast<double>(total) / static_cast<double>(channels.size());
+    return static_cast<double>(maximum) / average;
+}
+
 double jain_inverse_latency_fairness(
     const std::vector<PerNodeMetricsSummary>& per_node) {
     double sum = 0.0;
@@ -302,7 +331,16 @@ void write_summary_json(const std::filesystem::path& path,
     output << "    \"average_wait\": " << summary.memory_average_wait << ",\n";
     output << "    \"max_wait\": " << summary.memory_max_wait << ",\n";
     output << "    \"peak_queue_depth\": "
-           << summary.memory_peak_queue_depth << "\n";
+           << summary.memory_peak_queue_depth << ",\n";
+    output << "    \"channels\": {\n";
+    output << "      \"count\": " << summary.memory_channel_count << ",\n";
+    output << "      \"peak_queue_depth\": "
+           << summary.memory_peak_channel_queue_depth << ",\n";
+    output << "      \"max_total_queue_wait\": "
+           << summary.max_channel_total_queue_wait << ",\n";
+    output << "      \"queue_imbalance\": "
+           << summary.channel_queue_imbalance << "\n";
+    output << "    }\n";
     output << "  },\n";
     output << "  \"contention\": {\n";
     output << "    \"top_by_queue_wait\": ";
@@ -430,7 +468,7 @@ void write_contention_by_object_csv(const std::filesystem::path& path,
                                  path.string());
     }
 
-    output << "epoch_id,object_id,remote_accesses,distinct_requesters,"
+    output << "epoch_id,object_id,memory_channel_id,remote_accesses,distinct_requesters,"
               "bytes_served,total_remote_service_time,total_queue_wait,"
               "max_queue_wait,queue_wait_samples,max_observed_queue_depth,"
               "average_queue_wait\n";
@@ -439,6 +477,7 @@ void write_contention_by_object_csv(const std::filesystem::path& path,
          simulator.stats().all_contention_stats()) {
         output << stats.epoch_id << ","
                << stats.object_id << ","
+               << stats.memory_channel_id << ","
                << stats.remote_accesses << ","
                << stats.distinct_requesters << ","
                << stats.bytes_served << ","
@@ -447,6 +486,33 @@ void write_contention_by_object_csv(const std::filesystem::path& path,
                << stats.max_queue_wait << ","
                << stats.queue_wait_samples << ","
                << stats.max_observed_queue_depth << ","
+               << stats.average_queue_wait << "\n";
+    }
+}
+
+void write_contention_by_channel_csv(const std::filesystem::path& path,
+                                     const Simulator& simulator) {
+    std::ofstream output(path);
+    if (!output) {
+        throw std::runtime_error("Failed to open channel contention output: " +
+                                 path.string());
+    }
+
+    output << "epoch_id,memory_channel_id,remote_accesses,bytes_served,"
+              "total_remote_service_time,total_queue_wait,max_queue_wait,"
+              "queue_wait_samples,max_queue_depth,average_queue_wait\n";
+    output << std::fixed << std::setprecision(6);
+    for (const ChannelContentionStats& stats :
+         simulator.stats().all_channel_contention_stats()) {
+        output << stats.epoch_id << ","
+               << stats.memory_channel_id << ","
+               << stats.remote_accesses << ","
+               << stats.bytes_served << ","
+               << stats.total_remote_service_time << ","
+               << stats.total_queue_wait << ","
+               << stats.max_queue_wait << ","
+               << stats.queue_wait_samples << ","
+               << stats.max_queue_depth << ","
                << stats.average_queue_wait << "\n";
     }
 }
@@ -754,6 +820,14 @@ MetricsSummary summarize_metrics(const std::string& experiment_name,
     summary.memory_average_wait = stats.average_memory_wait();
     summary.memory_max_wait = stats.max_memory_wait();
     summary.memory_peak_queue_depth = stats.peak_memory_queue_depth();
+    summary.memory_channel_count = simulator.config().memory_channel_count;
+    summary.memory_peak_channel_queue_depth =
+        stats.peak_memory_channel_queue_depth();
+    const std::vector<ChannelContentionStats> channel_stats =
+        stats.all_channel_contention_stats();
+    summary.max_channel_total_queue_wait =
+        max_channel_total_queue_wait(channel_stats);
+    summary.channel_queue_imbalance = channel_queue_imbalance(channel_stats);
     // Keep the most contended objects by the two metrics surfaced in the JSON
     // summary.
     summary.top_by_queue_wait =
@@ -829,6 +903,8 @@ ExperimentResult ExperimentRunner::run_config(
     write_latencies_csv(output_path / "latencies.csv", simulator);
     write_contention_by_object_csv(output_path / "contention_by_object.csv",
                                    simulator);
+    write_contention_by_channel_csv(output_path / "contention_by_channel.csv",
+                                    simulator);
     write_policy_diagnostics_csv(output_path / "policy_diagnostics.csv",
                                  simulator);
     write_cache_admissions_csv(output_path / "cache_admissions.csv",

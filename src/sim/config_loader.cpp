@@ -383,6 +383,11 @@ ExperimentConfig load_experiment_config(const std::string& path) {
     simulation.memory_bandwidth_bytes_per_time =
         required_as<std::uint64_t>(
             memory_node, "bandwidth_bytes_per_time", "memory");
+    simulation.memory_channel_count = optional_positive_u64(
+        memory_node,
+        "channel_count",
+        "memory",
+        simulation.memory_channel_count);
     simulation.one_way_link_latency =
         required_as<SimTime>(link_node, "one_way_latency", "link");
     simulation.local_cache = LocalCacheConfig{
@@ -400,6 +405,7 @@ ExperimentConfig load_experiment_config(const std::string& path) {
     workload.compute_node_ids = parse_compute_node_ids(workload_node);
     workload.object_count =
         required_as<std::uint64_t>(workload_node, "object_count", "workload");
+    workload.memory_channel_count = simulation.memory_channel_count;
     workload.object_size_bytes = required_as<std::uint64_t>(
         workload_node, "object_size_bytes", "workload");
     if (workload.object_size_bytes == 0) {
@@ -411,6 +417,17 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         "hot_set_churn_fraction",
         "workload",
         workload.hot_set_churn_fraction);
+    if (const YAML::Node hot_object_channel_count =
+            workload_node["hot_object_channel_count"]) {
+        workload.hot_object_channel_count =
+            hot_object_channel_count.as<std::uint64_t>();
+        if (workload.hot_object_channel_count >
+            workload.memory_channel_count) {
+            throw std::invalid_argument(
+                "Invalid workload.hot_object_channel_count: expected a value "
+                "no larger than memory.channel_count");
+        }
+    }
     if (const YAML::Node object_size_mode_node =
             workload_node["object_size_mode"]) {
         workload.object_size_mode =

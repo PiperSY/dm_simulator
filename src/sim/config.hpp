@@ -109,6 +109,7 @@ struct SimulationConfig {
     std::uint64_t memory_bandwidth_bytes_per_time = 16;
     LocalCacheConfig local_cache;
     std::optional<SyntheticWorkloadConfig> synthetic_workload;
+    std::uint64_t memory_channel_count = 1;
 };
 
 }  // namespace dm_sim

@@ -72,6 +72,10 @@ struct MetricsSummary {
     double memory_average_wait = 0.0;
     SimTime memory_max_wait = 0;
     std::size_t memory_peak_queue_depth = 0;
+    std::uint64_t memory_channel_count = 1;
+    std::size_t memory_peak_channel_queue_depth = 0;
+    SimTime max_channel_total_queue_wait = 0;
+    double channel_queue_imbalance = 0.0;
     std::vector<ObjectContentionStats> top_by_queue_wait;
     std::vector<ObjectContentionStats> top_by_service_time;
     std::size_t policy_admitted = 0;
