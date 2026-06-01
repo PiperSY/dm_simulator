@@ -220,7 +220,7 @@ add_test(
         eval_policy_viability
         --dry-run
         --expect-runs
-        360
+        175
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_eval_policy_viability_dry_run
 )
@@ -237,6 +237,118 @@ add_test(
         36
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_phase_e_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_interactions_churn_epoch_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_interactions_churn_epoch
+        --dry-run
+        --expect-runs
+        100
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_interactions_churn_epoch_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_interactions_cache_hotset_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_interactions_cache_hotset
+        --dry-run
+        --expect-runs
+        60
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_interactions_cache_hotset_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_interactions_node_bandwidth_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_interactions_node_bandwidth
+        --dry-run
+        --expect-runs
+        45
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_interactions_node_bandwidth_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_knob_cache_pressure_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_knob_cache_pressure
+        --dry-run
+        --expect-runs
+        24
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_knob_cache_pressure_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_knob_epoch_reuse_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_knob_epoch_reuse
+        --dry-run
+        --expect-runs
+        18
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_knob_epoch_reuse_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_knob_object_size_mix_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_knob_object_size_mix
+        --dry-run
+        --expect-runs
+        15
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_knob_object_size_mix_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_knob_hot_concentration_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_knob_hot_concentration
+        --dry-run
+        --expect-runs
+        18
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_knob_hot_concentration_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_contention_weight_sensitivity_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_contention_weight_sensitivity
+        --dry-run
+        --expect-runs
+        25
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_contention_weight_sensitivity_dry_run
 )
 
 add_test(

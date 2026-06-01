@@ -56,6 +56,28 @@ EVAL_POLICY_VIABILITY_POLICIES = (
     *CONTENTION_VARIANT_POLICIES,
 )
 
+EVAL_INTERACTION_POLICIES = (
+    "lru",
+    "hotness_only_windowed",
+    "contention_aware_smoothed",
+    "contention_aware_reuse_gated",
+    "contention_aware_hysteresis",
+)
+
+EVAL_KNOB_POLICIES = (
+    "lru",
+    "hotness_only_windowed",
+    "contention_aware_smoothed",
+)
+
+# Phase 4C intentionally compares only the practical baseline and one
+# contention-aware variant so score-weight effects are not mixed with variant
+# differences.
+EVAL_CONTENTION_WEIGHT_POLICIES = (
+    "lru",
+    "contention_aware_smoothed",
+)
+
 POLICIES = (
     *BASE_POLICIES,
     "hotness_only_cumulative",
@@ -82,12 +104,98 @@ LINK_LATENCY_BY_LEVEL = {
     "high": 20,
 }
 
+RUN_NAME_ALIASES = {
+    "eval_interactions_churn_epoch": "int_churn_epoch",
+    "eval_interactions_cache_hotset": "int_cache_hotset",
+    "eval_interactions_node_bandwidth": "int_node_bw",
+    "contention_aware_smoothed": "ca_smoothed",
+    "contention_aware_reuse_gated": "ca_reuse_gated",
+    "contention_aware_hysteresis": "ca_hysteresis",
+    "eval_knob_cache_pressure": "knob_cache",
+    "eval_knob_epoch_reuse": "knob_epoch",
+    "eval_knob_object_size_mix": "knob_size_mix",
+    "eval_knob_hot_concentration": "knob_hotp",
+    "eval_contention_weight_sensitivity": "weight_sensitivity",
+}
+
+
+@dataclass(frozen=True)
+class ContentionWeightProfile:
+    """One experimental override for a contention-aware score weight."""
+
+    profile: str
+    weight_name: str
+    weight_value: float | None
+
+
+# Empty profile used by non-contention policies and normal matrix presets. This
+# keeps MatrixRun uniform without giving LRU fake contention-weight metadata.
+NO_CONTENTION_WEIGHT_PROFILE = ContentionWeightProfile("", "", None)
+
+# Defaults mirror the simulator's ContentionPolicyConfig defaults. Weight
+# sensitivity profiles copy this map and override exactly one entry.
+DEFAULT_CONTENTION_WEIGHTS = {
+    "local_hotness_weight": 1.0,
+    "remote_access_weight": 1.0,
+    "distinct_requester_weight": 1.5,
+    "queue_wait_weight": 2.0,
+    "remote_service_time_weight": 1.0,
+    "size_penalty_weight": 0.5,
+}
+
+# Run names have strict filesystem length limits, so profiles use short tokens
+# while aggregate CSV columns preserve the full weight names.
+CONTENTION_WEIGHT_NAME_TOKENS = {
+    "local_hotness_weight": "lh",
+    "remote_access_weight": "ra",
+    "distinct_requester_weight": "dr",
+    "queue_wait_weight": "qw",
+    "remote_service_time_weight": "rs",
+    "size_penalty_weight": "sp",
+}
+
+# Phase 4C uses one-at-a-time sweeps around the default scoring model. These are
+# explanatory sensitivity ranges, not an optimization grid.
+CONTENTION_WEIGHT_SWEEPS = (
+    ("local_hotness_weight", (0.0, 0.5, 1.0, 2.0)),
+    ("remote_access_weight", (0.0, 0.5, 1.0, 2.0)),
+    ("distinct_requester_weight", (0.0, 1.0, 1.5, 3.0)),
+    ("queue_wait_weight", (0.0, 1.0, 2.0, 4.0)),
+    ("remote_service_time_weight", (0.0, 0.5, 1.0, 2.0)),
+    ("size_penalty_weight", (0.0, 0.25, 0.5, 1.0)),
+)
+
+
+def profile_value_token(value: float) -> str:
+    """Return a compact numeric token for profile names and run names."""
+
+    return f"{value:g}".replace(".", "p")
+
+
+# Precompute the 24 profiles so dry-run validation, run generation, and docs all
+# share the same source of truth.
+CONTENTION_WEIGHT_PROFILES = tuple(
+    ContentionWeightProfile(
+        profile=(
+            f"{CONTENTION_WEIGHT_NAME_TOKENS[weight_name]}-"
+            f"{profile_value_token(value)}"
+        ),
+        weight_name=weight_name,
+        weight_value=value,
+    )
+    for weight_name, values in CONTENTION_WEIGHT_SWEEPS
+    for value in values
+)
+
 AGGREGATE_COLUMNS = (
     "status",
     "error",
     "preset",
     "experiment_name",
     "policy",
+    "contention_weight_profile",
+    "contention_weight_name",
+    "contention_weight_value",
     "seed",
     "node_count",
     "compute_node_count",
@@ -167,7 +275,7 @@ class MatrixPreset:
             cache-capacity calculations.
         object_size_small_bytes: Small-object size for bimodal workloads.
         object_size_large_bytes: Large-object size for bimodal workloads.
-        large_object_probability: Probability that an object is large in
+        large_object_probabilities: Probability sweep for large objects in
             bimodal mode.
         cache_capacity_hotset_multipliers: Cache capacities expressed as
             multiples of one hot set's representative byte size.
@@ -200,7 +308,7 @@ class MatrixPreset:
     object_size_bytes: int
     object_size_small_bytes: int
     object_size_large_bytes: int
-    large_object_probability: float
+    large_object_probabilities: tuple[float, ...]
     cache_capacity_hotset_multipliers: tuple[float, ...]
     memory_bandwidth_levels: tuple[str, ...]
     memory_base_latency_levels: tuple[str, ...]
@@ -222,6 +330,8 @@ class MatrixRun:
     Attributes:
         preset: The MatrixPreset this run was generated from.
         policy: Cache policy name written to local_cache.policy.
+        contention_weight_profile: Optional one-at-a-time contention weight
+            override used only by eval_contention_weight_sensitivity.
         seed: Synthetic workload RNG seed.
         compute_node_count: Number of compute nodes active in this run.
         object_count: Size of the synthetic object universe.
@@ -233,6 +343,8 @@ class MatrixRun:
         hot_set_churn_fraction: Fraction of hot-set entries replaced per epoch.
         cross_node_overlap: Hot-set overlap level: "low", "medium", or "high".
         object_size_mode: Object-size generation mode: "fixed" or "bimodal".
+        large_object_probability: Probability that an object is large in
+            bimodal mode.
         cache_capacity_hotset_multiplier: Cache size as a multiple of one hot
             set's representative byte footprint.
         memory_bandwidth_level: Named memory bandwidth setting.
@@ -245,6 +357,7 @@ class MatrixRun:
 
     preset: MatrixPreset
     policy: str
+    contention_weight_profile: ContentionWeightProfile
     seed: int
     compute_node_count: int
     object_count: int
@@ -255,6 +368,7 @@ class MatrixRun:
     hot_set_churn_fraction: float
     cross_node_overlap: str
     object_size_mode: str
+    large_object_probability: float
     cache_capacity_hotset_multiplier: float
     memory_bandwidth_level: str
     memory_base_latency_level: str
@@ -276,7 +390,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.1,
+        large_object_probabilities=(0.1,),
         cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("moderate",),
         memory_base_latency_levels=("medium",),
@@ -301,7 +415,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.1,
+        large_object_probabilities=(0.1,),
         cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("moderate",),
         memory_base_latency_levels=("medium",),
@@ -326,7 +440,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.2,
+        large_object_probabilities=(0.2,),
         cache_capacity_hotset_multipliers=(1.0,),
         memory_bandwidth_levels=("moderate",),
         memory_base_latency_levels=("medium",),
@@ -351,7 +465,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.2,
+        large_object_probabilities=(0.2,),
         cache_capacity_hotset_multipliers=(0.5, 1.0, 2.0),
         memory_bandwidth_levels=("moderate", "severe"),
         memory_base_latency_levels=("medium",),
@@ -377,7 +491,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.2,
+        large_object_probabilities=(0.2,),
         cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("mild", "moderate", "severe"),
         memory_base_latency_levels=("medium",),
@@ -403,7 +517,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.1,
+        large_object_probabilities=(0.1,),
         cache_capacity_hotset_multipliers=(0.2, 0.3, 0.4, 0.5, 0.6),
         memory_bandwidth_levels=("severe",),
         memory_base_latency_levels=("medium",),
@@ -414,6 +528,216 @@ PRESETS = {
         hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
         hot_set_churn_fractions=(0.05, 0.1, 0.2, 0.3, 0.4),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Interaction study 1: isolate how telemetry staleness changes when hot
+    # sets churn faster or slower than the per-epoch reuse window.
+    "eval_interactions_churn_epoch": MatrixPreset(
+        name="eval_interactions_churn_epoch",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(8, 16, 32, 64),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.0, 0.25, 0.5, 0.75, 1.0),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Interaction study 2: isolate cache pressure by varying cache capacity
+    # relative to hot-set size while keeping the contention regime fixed.
+    "eval_interactions_cache_hotset": MatrixPreset(
+        name="eval_interactions_cache_hotset",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.25, 0.5, 1.0, 2.0),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(256,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(8, 16, 32),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.25,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Interaction study 3: isolate when architecture crosses from lightly
+    # loaded to contended by varying demand sources and memory bandwidth.
+    "eval_interactions_node_bandwidth": MatrixPreset(
+        name="eval_interactions_node_bandwidth",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(4, 8, 16),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("mild", "moderate", "severe"),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(256,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.25,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Knob demo 1: vary only cache capacity so presentation plots can show
+    # where policies are starved, useful, or large enough for LRU to dominate.
+    "eval_knob_cache_pressure": MatrixPreset(
+        name="eval_knob_cache_pressure",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.1, 0.2, 0.3, 0.4,
+                                           0.5, 0.6, 0.8, 1.0),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Knob demo 2: vary per-epoch request volume to show how local reuse
+    # opportunities change hotness and contention-aware policy behavior.
+    "eval_knob_epoch_reuse": MatrixPreset(
+        name="eval_knob_epoch_reuse",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(4, 8, 16, 32, 64, 128),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Knob demo 3: vary large-object probability to isolate when service-cost
+    # heterogeneity gives contention-aware telemetry something useful to exploit.
+    "eval_knob_object_size_mix": MatrixPreset(
+        name="eval_knob_object_size_mix",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.0, 0.05, 0.1, 0.2, 0.3),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Knob demo 4: vary hot-access concentration to show when locality alone is
+    # enough for LRU/hotness and when contention signals still add context.
+    "eval_knob_hot_concentration": MatrixPreset(
+        name="eval_knob_hot_concentration",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.5, 0.6, 0.7, 0.8, 0.9, 0.95),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+    ),
+    # Weight sensitivity is a one-at-a-time policy study, not an automatic
+    # tuning sweep. The runner adds one shared LRU baseline plus the 24
+    # contention-aware weight profiles defined above.
+    "eval_contention_weight_sensitivity": MatrixPreset(
+        name="eval_contention_weight_sensitivity",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(8,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.5,),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.2,),
         cross_node_overlaps=("high",),
         object_size_modes=("bimodal",),
     ),
@@ -430,7 +754,7 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probability=0.2,
+        large_object_probabilities=(0.2,),
         cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("severe",),
         memory_base_latency_levels=("medium",),
@@ -470,6 +794,8 @@ def parse_args() -> argparse.Namespace:
         --epoch-lengths: Comma-separated requests-per-node-per-epoch values.
         --overlaps: Comma-separated cross-node overlap levels.
         --object-size-modes: Comma-separated object-size generation modes.
+        --large-object-probabilities: Comma-separated large-object probabilities
+            for bimodal workloads.
         --expect-runs: Optional dry-run assertion for generated run count.
         --dry-run: Generate configs and aggregate rows without simulation.
         --keep-going: Continue the matrix after a simulator failure.
@@ -572,6 +898,11 @@ def parse_args() -> argparse.Namespace:
         "--object-size-modes",
         default=None,
         help="Comma-separated object size modes: fixed, bimodal.",
+    )
+    parser.add_argument(
+        "--large-object-probabilities",
+        default=None,
+        help="Comma-separated bimodal large-object probabilities in [0, 1].",
     )
     parser.add_argument(
         "--expect-runs",
@@ -738,6 +1069,12 @@ def slug_float(value: float) -> str:
     return f"{value:g}".replace(".", "p")
 
 
+def run_name_token(value: str) -> str:
+    """Use compact path tokens while preserving full names in aggregate rows."""
+
+    return RUN_NAME_ALIASES.get(value, value)
+
+
 def hot_set_churn_label(hot_set_mode: str, churn_fraction: float) -> str:
     """Return a compact human label for churn behavior."""
 
@@ -790,6 +1127,7 @@ def cache_capacity_bytes(run: MatrixRun) -> int:
 
 def run_slug(preset: MatrixPreset,
              policy: str,
+             contention_weight_profile: ContentionWeightProfile,
              seed: int,
              compute_node_count: int,
              object_count: int,
@@ -800,15 +1138,22 @@ def run_slug(preset: MatrixPreset,
              churn_fraction: float,
              overlap: str,
              object_size_mode: str,
+             large_object_probability: float,
              cache_multiplier: float,
              memory_bandwidth_level: str,
              memory_base_latency_level: str,
              link_latency_level: str) -> str:
     """Build a deterministic run name encoding all matrix dimensions."""
 
+    weight_part = (
+        f"__weight-{run_name_token(contention_weight_profile.profile)}"
+        if contention_weight_profile.profile
+        else ""
+    )
     return (
-        f"{preset.name}"
-        f"__policy-{policy}"
+        f"{run_name_token(preset.name)}"
+        f"__policy-{run_name_token(policy)}"
+        f"{weight_part}"
         f"__seed-{seed}"
         f"__nodes-{compute_node_count}"
         f"__objects-{object_count}"
@@ -820,6 +1165,7 @@ def run_slug(preset: MatrixPreset,
         f"__churn-{slug_float(churn_fraction)}"
         f"__overlap-{overlap}"
         f"__size-{object_size_mode}"
+        f"__largep-{slug_float(large_object_probability)}"
         f"__cachex-{slug_float(cache_multiplier)}"
         f"__bw-{memory_bandwidth_level}"
         f"__base-{memory_base_latency_level}"
@@ -840,6 +1186,7 @@ def build_runs(
     churn_fractions: list[float],
     overlaps: list[str],
     object_size_modes: list[str],
+    large_object_probabilities: list[float],
     cache_multipliers: list[float],
     memory_bandwidth_levels: list[str],
     memory_base_latency_levels: list[str],
@@ -856,6 +1203,12 @@ def build_runs(
     # architecture settings.
     for seed in seeds:
         for policy in policies:
+            # Most presets get the empty profile, but Phase 4C expands only
+            # contention_aware_smoothed into 24 one-at-a-time weight overrides.
+            weight_profiles = contention_weight_profiles_for_policy(
+                preset,
+                policy,
+            )
             for node_count in node_counts:
                 for object_count in object_counts:
                     for epoch_count in epoch_counts:
@@ -865,51 +1218,57 @@ def build_runs(
                                     for churn_fraction in churn_fractions:
                                         for overlap in overlaps:
                                             for object_size_mode in object_size_modes:
-                                                for cache_multiplier in cache_multipliers:
-                                                    for bandwidth_level in memory_bandwidth_levels:
-                                                        for base_level in memory_base_latency_levels:
-                                                            for link_level in link_latency_levels:
-                                                                name = run_slug(
-                                                                    preset,
-                                                                    policy,
-                                                                    seed,
-                                                                    node_count,
-                                                                    object_count,
-                                                                    epoch_count,
-                                                                    epoch_length,
-                                                                    hot_set_size,
-                                                                    hot_access_probability,
-                                                                    churn_fraction,
-                                                                    overlap,
-                                                                    object_size_mode,
-                                                                    cache_multiplier,
-                                                                    bandwidth_level,
-                                                                    base_level,
-                                                                    link_level,
-                                                                )
-                                                                runs.append(
-                                                                    MatrixRun(
-                                                                        preset=preset,
-                                                                        policy=policy,
-                                                                        seed=seed,
-                                                                        compute_node_count=node_count,
-                                                                        object_count=object_count,
-                                                                        epoch_count=epoch_count,
-                                                                        requests_per_node_per_epoch=epoch_length,
-                                                                        hot_set_size=hot_set_size,
-                                                                        hot_access_probability=hot_access_probability,
-                                                                        hot_set_churn_fraction=churn_fraction,
-                                                                        cross_node_overlap=overlap,
-                                                                        object_size_mode=object_size_mode,
-                                                                        cache_capacity_hotset_multiplier=cache_multiplier,
-                                                                        memory_bandwidth_level=bandwidth_level,
-                                                                        memory_base_latency_level=base_level,
-                                                                        link_latency_level=link_level,
-                                                                        run_name=name,
-                                                                        config_path=config_dir / f"{name}.yaml",
-                                                                        output_dir=output_root / name,
-                                                                    )
-                                                                )
+                                                for large_probability in large_object_probabilities:
+                                                    for weight_profile in weight_profiles:
+                                                        for cache_multiplier in cache_multipliers:
+                                                            for bandwidth_level in memory_bandwidth_levels:
+                                                                for base_level in memory_base_latency_levels:
+                                                                    for link_level in link_latency_levels:
+                                                                        name = run_slug(
+                                                                            preset,
+                                                                            policy,
+                                                                            weight_profile,
+                                                                            seed,
+                                                                            node_count,
+                                                                            object_count,
+                                                                            epoch_count,
+                                                                            epoch_length,
+                                                                            hot_set_size,
+                                                                            hot_access_probability,
+                                                                            churn_fraction,
+                                                                            overlap,
+                                                                            object_size_mode,
+                                                                            large_probability,
+                                                                            cache_multiplier,
+                                                                            bandwidth_level,
+                                                                            base_level,
+                                                                            link_level,
+                                                                        )
+                                                                        runs.append(
+                                                                            MatrixRun(
+                                                                                preset=preset,
+                                                                                policy=policy,
+                                                                                contention_weight_profile=weight_profile,
+                                                                                seed=seed,
+                                                                                compute_node_count=node_count,
+                                                                                object_count=object_count,
+                                                                                epoch_count=epoch_count,
+                                                                                requests_per_node_per_epoch=epoch_length,
+                                                                                hot_set_size=hot_set_size,
+                                                                                hot_access_probability=hot_access_probability,
+                                                                                hot_set_churn_fraction=churn_fraction,
+                                                                                cross_node_overlap=overlap,
+                                                                                object_size_mode=object_size_mode,
+                                                                                large_object_probability=large_probability,
+                                                                                cache_capacity_hotset_multiplier=cache_multiplier,
+                                                                                memory_bandwidth_level=bandwidth_level,
+                                                                                memory_base_latency_level=base_level,
+                                                                                link_latency_level=link_level,
+                                                                                run_name=name,
+                                                                                config_path=config_dir / f"{name}.yaml",
+                                                                                output_dir=output_root / name,
+                                                                            )
+                                                                        )
     return runs
 
 
@@ -960,6 +1319,32 @@ def hotness_history_mode(policy: str) -> str:
     return "epoch"
 
 
+def contention_weight_profiles_for_policy(
+    preset: MatrixPreset,
+    policy: str,
+) -> tuple[ContentionWeightProfile, ...]:
+    """Return controlled weight profiles for a preset/policy pair."""
+
+    if preset.name == "eval_contention_weight_sensitivity":
+        # LRU is a single shared baseline. Only the smoothed contention policy
+        # receives profiles, avoiding 24 identical baseline reruns.
+        if policy == "contention_aware_smoothed":
+            return CONTENTION_WEIGHT_PROFILES
+        return (NO_CONTENTION_WEIGHT_PROFILE,)
+    return (NO_CONTENTION_WEIGHT_PROFILE,)
+
+
+def contention_weights_for_profile(
+    profile: ContentionWeightProfile,
+) -> dict[str, float]:
+    """Apply a single weight override to the default score weights."""
+
+    weights = dict(DEFAULT_CONTENTION_WEIGHTS)
+    if profile.weight_name:
+        weights[profile.weight_name] = float(profile.weight_value)
+    return weights
+
+
 def write_yaml_config(run: MatrixRun) -> None:
     """Write the simulator YAML config for one matrix run."""
 
@@ -1004,16 +1389,28 @@ def write_yaml_config(run: MatrixRun) -> None:
         if history_mode == "windowed":
             lines.append("    history_window_epochs: 4")
     elif yaml_policy == "contention_aware":
+        weights = contention_weights_for_profile(run.contention_weight_profile)
         lines.extend(
             [
                 "  contention:",
                 f"    variant: {contention_variant}",
-                "    local_hotness_weight: 1.0",
-                "    remote_access_weight: 1.0",
-                "    distinct_requester_weight: 1.5",
-                "    queue_wait_weight: 2.0",
-                "    remote_service_time_weight: 1.0",
-                "    size_penalty_weight: 0.5",
+            ]
+        )
+        if run.contention_weight_profile.weight_name:
+            lines.extend(
+                [
+                    "    # Weight-sensitivity profiles override exactly one",
+                    "    # scoring weight while preserving all other defaults.",
+                ]
+            )
+        lines.extend(
+            [
+                f"    local_hotness_weight: {weights['local_hotness_weight']:g}",
+                f"    remote_access_weight: {weights['remote_access_weight']:g}",
+                f"    distinct_requester_weight: {weights['distinct_requester_weight']:g}",
+                f"    queue_wait_weight: {weights['queue_wait_weight']:g}",
+                f"    remote_service_time_weight: {weights['remote_service_time_weight']:g}",
+                f"    size_penalty_weight: {weights['size_penalty_weight']:g}",
                 "    min_admit_score: 1.0",
                 "    local_hotness_threshold: 2",
                 f"    reset_on_epoch_change: {yaml_bool(True)}",
@@ -1057,7 +1454,7 @@ def write_yaml_config(run: MatrixRun) -> None:
             f"  object_size_mode: {run.object_size_mode}",
             f"  object_size_small_bytes: {preset.object_size_small_bytes}",
             f"  object_size_large_bytes: {preset.object_size_large_bytes}",
-            f"  large_object_probability: {preset.large_object_probability:g}",
+            f"  large_object_probability: {run.large_object_probability:g}",
             f"  requests_per_node_per_epoch: {run.requests_per_node_per_epoch}",
             f"  epoch_count: {run.epoch_count}",
             f"  hot_set_size: {run.hot_set_size}",
@@ -1081,6 +1478,13 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "preset": preset.name,
         "experiment_name": run.run_name,
         "policy": run.policy,
+        "contention_weight_profile": run.contention_weight_profile.profile,
+        "contention_weight_name": run.contention_weight_profile.weight_name,
+        "contention_weight_value": (
+            ""
+            if run.contention_weight_profile.weight_value is None
+            else run.contention_weight_profile.weight_value
+        ),
         "seed": run.seed,
         "node_count": run.compute_node_count,
         "compute_node_count": run.compute_node_count,
@@ -1100,7 +1504,7 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "object_size_bytes": preset.object_size_bytes,
         "object_size_small_bytes": preset.object_size_small_bytes,
         "object_size_large_bytes": preset.object_size_large_bytes,
-        "large_object_probability": preset.large_object_probability,
+        "large_object_probability": run.large_object_probability,
         "cache_capacity_hotset_multiplier": (
             run.cache_capacity_hotset_multiplier
         ),
@@ -1330,7 +1734,7 @@ def verify_dry_run(
             "object_size_mode:",
             "object_size_small_bytes:",
             "object_size_large_bytes:",
-            "large_object_probability:",
+            f"large_object_probability: {run.large_object_probability:g}",
         )
         for field in required_fields:
             if field not in config_text:
@@ -1349,6 +1753,15 @@ def verify_dry_run(
             # Variant labels are experiment-facing aliases; generated YAML must
             # keep the simulator policy stable and make the variant explicit.
             for field in ("policy: contention_aware", f"variant: {variant}"):
+                if field not in config_text:
+                    raise RuntimeError(
+                        f"Dry run config {run.config_path} is missing {field}"
+                    )
+            expected_weights = contention_weights_for_profile(
+                run.contention_weight_profile,
+            )
+            for weight_name, weight_value in expected_weights.items():
+                field = f"{weight_name}: {weight_value:g}"
                 if field not in config_text:
                     raise RuntimeError(
                         f"Dry run config {run.config_path} is missing {field}"
@@ -1377,6 +1790,26 @@ def verify_dry_run(
     if len(body_rows) != len(runs):
         raise RuntimeError("Dry run aggregate row count does not match runs")
 
+    if runs and runs[0].preset.name == "eval_contention_weight_sensitivity":
+        lru_runs = [run for run in runs if run.policy == "lru"]
+        profiled_runs = [
+            run for run in runs
+            if run.policy == "contention_aware_smoothed"
+        ]
+        if any(run.contention_weight_profile.profile for run in lru_runs):
+            raise RuntimeError("LRU baseline should not receive a weight profile")
+        if any(not run.contention_weight_profile.profile for run in profiled_runs):
+            raise RuntimeError("Contention weight runs must all carry profiles")
+        if (set(selected_policies) == set(EVAL_CONTENTION_WEIGHT_POLICIES)
+                and len(runs) == 25):
+            if len(lru_runs) != 1 or len(profiled_runs) != len(
+                CONTENTION_WEIGHT_PROFILES
+            ):
+                raise RuntimeError(
+                    "Weight sensitivity dry run should produce one LRU baseline "
+                    f"and {len(CONTENTION_WEIGHT_PROFILES)} profiled contention runs"
+                )
+
 
 def main() -> int:
     """Entry point: parse sweeps, generate configs, run, and aggregate."""
@@ -1392,6 +1825,12 @@ def main() -> int:
         if preset.name == "eval_contention_calibration"
         else EVAL_POLICY_VIABILITY_POLICIES
         if preset.name == "eval_policy_viability"
+        else EVAL_INTERACTION_POLICIES
+        if preset.name.startswith("eval_interactions_")
+        else EVAL_KNOB_POLICIES
+        if preset.name.startswith("eval_knob_")
+        else EVAL_CONTENTION_WEIGHT_POLICIES
+        if preset.name == "eval_contention_weight_sensitivity"
         else BASE_POLICIES
     )
     policies = (
@@ -1444,6 +1883,12 @@ def main() -> int:
         parse_object_size_modes(args.object_size_modes)
         if args.object_size_modes is not None
         else list(preset.object_size_modes)
+    )
+    large_object_probabilities = (
+        parse_probabilities(args.large_object_probabilities,
+                            "large-object probability")
+        if args.large_object_probabilities is not None
+        else list(preset.large_object_probabilities)
     )
     cache_multipliers = (
         parse_positive_floats(args.cache_hotset_multipliers,
@@ -1502,6 +1947,7 @@ def main() -> int:
                       churn_fractions,
                       overlaps,
                       object_size_modes,
+                      large_object_probabilities,
                       cache_multipliers,
                       memory_bandwidth_levels,
                       memory_base_latency_levels,

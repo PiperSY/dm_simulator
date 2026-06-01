@@ -3,4 +3,5 @@
 build/
 scripts/__pycache__/
 tests/__pycache__/
-tests/fixtures/
+!tests/fixtures/
+!tests/fixtures/*.csv

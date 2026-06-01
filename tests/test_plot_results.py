@@ -260,6 +260,49 @@ def main() -> int:
     )
     require("Report mode: `interaction`" in interaction_report,
             "Interaction report should auto-detect interaction mode")
+
+    parameter_dir = output_dir.parent / "plot_results_parameter_demo"
+    run_plot_results(
+        script,
+        repo_root / "tests" / "fixtures" /
+        "aggregate_summary_parameter_demo.csv",
+        parameter_dir,
+    )
+    parameter_files = [
+        parameter_dir / "plots" / "parameter_demo_latency_hit_rate.svg",
+        parameter_dir / "plots" / "parameter_demo_memory_pressure.svg",
+        parameter_dir / "plots" / "parameter_demo_admission_quality.svg",
+        parameter_dir / "plots" / "parameter_demo_tail_latency.svg",
+    ]
+    for path in parameter_files:
+        require(path.exists(), f"Missing parameter-demo plot: {path}")
+    parameter_report = (parameter_dir / "report.md").read_text(
+        encoding="utf-8",
+    )
+    require("Report mode: `parameter_demo`" in parameter_report,
+            "Parameter-demo report should auto-detect eval_knob presets")
+    require("Isolated Parameter Demonstrations" in parameter_report,
+            "Parameter-demo report should group isolated knob plots")
+
+    weight_dir = output_dir.parent / "plot_results_weight_sensitivity"
+    run_plot_results(
+        script,
+        repo_root / "tests" / "fixtures" /
+        "aggregate_summary_weight_sensitivity.csv",
+        weight_dir,
+    )
+    weight_files = [
+        weight_dir / "plots" / "weight_sensitivity_latency.svg",
+        weight_dir / "plots" / "weight_sensitivity_memory_hit_rate.svg",
+        weight_dir / "plots" / "weight_sensitivity_admission_regret.svg",
+    ]
+    for path in weight_files:
+        require(path.exists(), f"Missing weight-sensitivity plot: {path}")
+    weight_report = (weight_dir / "report.md").read_text(encoding="utf-8")
+    require("Report mode: `weight_sensitivity`" in weight_report,
+            "Weight report should auto-detect weight-sensitivity mode")
+    require("Contention Weight Sensitivity" in weight_report,
+            "Weight report should group weight-sensitivity plots")
     return 0
 
 

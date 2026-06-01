@@ -62,6 +62,11 @@ GROUP_COLUMNS = (
 
 COMPARISON_COLUMNS = (
     *GROUP_COLUMNS,
+    # Weight profile columns are reported but intentionally excluded from
+    # GROUP_COLUMNS so all 24 profiled runs can share one matched LRU baseline.
+    "contention_weight_profile",
+    "contention_weight_name",
+    "contention_weight_value",
     "policy",
     "baseline_policy",
     "baseline_available",
@@ -165,7 +170,13 @@ CONDITION_DIMENSIONS = (
     "object_count",
     "hot_set_size",
     "hot_access_probability",
+    "large_object_probability",
     "cache_capacity_hotset_multiplier",
+    # These are condition/report dimensions only. They are not baseline-match
+    # keys because the baseline run has blank weight metadata by design.
+    "contention_weight_profile",
+    "contention_weight_name",
+    "contention_weight_value",
     "memory_bandwidth_level",
     "node_count",
 )
@@ -183,6 +194,8 @@ REPORT_MODES = (
     "contention_calibration",
     "policy_viability",
     "interaction",
+    "parameter_demo",
+    "weight_sensitivity",
 )
 
 CATEGORICAL_ORDER = {
@@ -190,6 +203,16 @@ CATEGORICAL_ORDER = {
     "memory_base_latency_level": ("low", "medium", "high"),
     "link_latency_level": ("low", "medium", "high"),
     "cross_node_overlap": ("low", "medium", "high"),
+    # Keep weight facets in the same order as the policy scoring formula so the
+    # sensitivity report reads from local evidence through remote-cost signals.
+    "contention_weight_name": (
+        "local_hotness_weight",
+        "remote_access_weight",
+        "distinct_requester_weight",
+        "queue_wait_weight",
+        "remote_service_time_weight",
+        "size_penalty_weight",
+    ),
 }
 
 
@@ -349,6 +372,10 @@ def detect_report_mode(rows: list[dict[str, str]], requested: str) -> str:
         return "policy_viability"
     if preset.startswith("eval_interactions_"):
         return "interaction"
+    if preset.startswith("eval_knob_"):
+        return "parameter_demo"
+    if preset == "eval_contention_weight_sensitivity":
+        return "weight_sensitivity"
     return "generic"
 
 
@@ -499,6 +526,15 @@ def build_policy_comparison(rows: list[dict[str, str]],
         }
         result.update(
             {
+                "contention_weight_profile": row.get(
+                    "contention_weight_profile",
+                    "",
+                ),
+                "contention_weight_name": row.get("contention_weight_name", ""),
+                "contention_weight_value": row.get(
+                    "contention_weight_value",
+                    "",
+                ),
                 "policy": row.get("policy", ""),
                 "baseline_policy": baseline_policy,
                 "baseline_available": baseline is not None,
@@ -2231,6 +2267,193 @@ def generate_interaction_plots(
                            plot_specs)
 
 
+def parameter_demo_axis_for_preset(preset: str) -> tuple[str, str] | None:
+    """Return the single intended sweep axis for an isolated knob preset."""
+
+    # Phase 4B presets are deliberately one-knob demonstrations. Keeping this
+    # mapping explicit prevents a report from silently choosing a misleading
+    # x-axis when fixed background dimensions are later adjusted.
+    if preset == "eval_knob_cache_pressure":
+        return ("cache_capacity_hotset_multiplier",
+                "Cache capacity / hot-set footprint")
+    if preset == "eval_knob_epoch_reuse":
+        return ("requests_per_node_per_epoch",
+                "Requests per node per epoch")
+    if preset == "eval_knob_object_size_mix":
+        return ("large_object_probability", "Large-object probability")
+    if preset == "eval_knob_hot_concentration":
+        return ("hot_access_probability", "Hot-access probability")
+    return None
+
+
+def generate_parameter_demo_plots(
+    plt: Any,
+    plots_dir: Path,
+    formats: list[str],
+    comparison_rows: list[dict[str, Any]],
+    swept: set[str],
+) -> list[PlotOutput]:
+    """Generate compact one-knob plots for presentation-oriented studies."""
+
+    presets = distinct_values(comparison_rows, "preset")
+    axis = parameter_demo_axis_for_preset(presets[0]) if len(presets) == 1 else None
+    if axis is None or axis[0] not in swept:
+        return generate_generic_plots(plt, plots_dir, formats,
+                                      comparison_rows, swept)
+
+    x_column, x_label = axis
+    # Each plot averages over all non-axis dimensions. That is intentional for
+    # Phase 4B: these studies are explanatory slices, not exhaustive rankings.
+    plot_specs = [
+        (
+            "parameter_demo_latency_hit_rate",
+            line_sweep_plot(
+                plt,
+                comparison_rows,
+                x_column,
+                [
+                    ("mean_latency_delta_pct",
+                     "Mean latency delta (%)",
+                     100.0),
+                    ("local_hit_rate", "Local hit rate", 1.0),
+                ],
+                "Isolated knob effect on latency and cache hits",
+                x_label,
+            ),
+        ),
+        (
+            "parameter_demo_memory_pressure",
+            line_sweep_plot(
+                plt,
+                comparison_rows,
+                x_column,
+                [
+                    ("average_memory_wait", "Average memory wait", 1.0),
+                    ("total_remote_accesses", "Total remote accesses", 1.0),
+                ],
+                "Isolated knob effect on remote-memory pressure",
+                x_label,
+            ),
+        ),
+        (
+            "parameter_demo_admission_quality",
+            line_sweep_plot(
+                plt,
+                comparison_rows,
+                x_column,
+                [
+                    ("admission_yield", "Admission yield", 1.0),
+                    ("reuse_after_admit_rate",
+                     "Reuse-after-admit rate",
+                     1.0),
+                ],
+                "Isolated knob effect on admission quality",
+                x_label,
+            ),
+        ),
+        (
+            "parameter_demo_tail_latency",
+            line_sweep_plot(
+                plt,
+                comparison_rows,
+                x_column,
+                [
+                    ("p99_latency_delta_pct",
+                     "P99 latency delta (%)",
+                     100.0),
+                ],
+                "Isolated knob effect on tail latency",
+                x_label,
+            ),
+        ),
+    ]
+    return save_plot_specs(
+        plt,
+        plots_dir,
+        formats,
+        "Isolated Parameter Demonstrations",
+        plot_specs,
+    )
+
+
+def generate_weight_sensitivity_plots(
+    plt: Any,
+    plots_dir: Path,
+    formats: list[str],
+    comparison_rows: list[dict[str, Any]],
+) -> list[PlotOutput]:
+    """Generate one-at-a-time contention weight sensitivity plots."""
+
+    # LRU has blank weight metadata and exists only as the shared baseline.
+    # Filtering keeps the visual story focused on how each contention-aware
+    # score component responds as its weight is varied.
+    rows = [
+        row for row in comparison_rows
+        if str(row.get("contention_weight_name", "")).strip()
+    ]
+    plot_specs = [
+        (
+            "weight_sensitivity_latency",
+            faceted_line_sweep_plot(
+                plt,
+                rows,
+                "contention_weight_name",
+                "contention_weight_value",
+                [
+                    ("mean_latency_delta_pct",
+                     "Mean latency delta (%)",
+                     100.0),
+                    ("p99_latency_delta_pct",
+                     "P99 latency delta (%)",
+                     100.0),
+                ],
+                "Contention-aware latency sensitivity by score weight",
+                "Weight",
+                "Weight value",
+            ),
+        ),
+        (
+            "weight_sensitivity_memory_hit_rate",
+            faceted_line_sweep_plot(
+                plt,
+                rows,
+                "contention_weight_name",
+                "contention_weight_value",
+                [
+                    ("local_hit_rate", "Local hit rate", 1.0),
+                    ("average_memory_wait", "Average memory wait", 1.0),
+                ],
+                "Contention-aware cache and memory sensitivity by score weight",
+                "Weight",
+                "Weight value",
+            ),
+        ),
+        (
+            "weight_sensitivity_admission_regret",
+            faceted_line_sweep_plot(
+                plt,
+                rows,
+                "contention_weight_name",
+                "contention_weight_value",
+                [
+                    ("admission_yield", "Admission yield", 1.0),
+                    ("eviction_regret_count", "Eviction regret", 1.0),
+                ],
+                "Contention-aware admission sensitivity by score weight",
+                "Weight",
+                "Weight value",
+            ),
+        ),
+    ]
+    return save_plot_specs(
+        plt,
+        plots_dir,
+        formats,
+        "Contention Weight Sensitivity",
+        plot_specs,
+    )
+
+
 def generate_plots(plt: Any,
                    output_dir: Path,
                    formats: list[str],
@@ -2279,6 +2502,25 @@ def generate_plots(plt: Any,
                 formats,
                 comparison_rows,
                 swept,
+            )
+        )
+    elif report_mode == "parameter_demo":
+        outputs.extend(
+            generate_parameter_demo_plots(
+                plt,
+                plots_dir,
+                formats,
+                comparison_rows,
+                swept,
+            )
+        )
+    elif report_mode == "weight_sensitivity":
+        outputs.extend(
+            generate_weight_sensitivity_plots(
+                plt,
+                plots_dir,
+                formats,
+                comparison_rows,
             )
         )
     else:
@@ -2642,6 +2884,29 @@ def write_report(path: Path,
                 "separate stable, predictive telemetry from high-churn regimes "
                 "where stale telemetry is expected to hurt contention-aware "
                 "policies.",
+                "",
+            ]
+        )
+    if report_mode == "parameter_demo":
+        lines.extend(
+            [
+                "For isolated parameter demonstrations, each report is designed "
+                "to vary one primary knob while holding the rest of the regime "
+                "fixed. These plots are best used to explain mechanism and "
+                "scaling behavior; they should not replace the broader policy "
+                "viability matrix as a complete ranking of policies.",
+                "",
+            ]
+        )
+    if report_mode == "weight_sensitivity":
+        lines.extend(
+            [
+                "For contention-weight sensitivity runs, the plots vary one "
+                "score weight at a time around the default smoothed policy. Use "
+                "these results to identify which score components drive "
+                "admission quality, latency, memory wait, and eviction regret; "
+                "do not treat the sweep as proof that a tuned policy wins in "
+                "all regimes.",
                 "",
             ]
         )
