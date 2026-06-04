@@ -36,6 +36,42 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def load_plot_results_module(repo_root: Path):
+    spec = importlib.util.spec_from_file_location(
+        "plot_results",
+        repo_root / "scripts" / "plot_results.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_heatmap_color_scale_helper(repo_root: Path) -> None:
+    plot_results = load_plot_results_module(repo_root)
+
+    vmin, vmax, cmap = plot_results.heatmap_color_scale(
+        "mean_latency_delta_pct",
+        [-7.1, 0.0, 8.8],
+    )
+    require(cmap == "coolwarm",
+            "Delta heatmaps should use a diverging color map")
+    require(abs(vmin + vmax) < 1e-9,
+            "Delta heatmaps should be centered on zero")
+    require(abs(vmax - 8.8) < 1e-9,
+            "Delta heatmaps should share the largest absolute bound")
+
+    vmin, vmax, cmap = plot_results.heatmap_color_scale(
+        "local_hit_rate",
+        [0.1, 0.2, 0.5],
+    )
+    require(cmap == "viridis",
+            "Absolute heatmaps should use a sequential color map")
+    require(abs(vmin - 0.1) < 1e-9 and abs(vmax - 0.5) < 1e-9,
+            "Absolute heatmaps should use global min/max bounds")
+
+
 def run_plot_results(script: Path,
                      fixture: Path,
                      output_dir: Path,
@@ -110,11 +146,13 @@ def seed_calibration_contention_fixture(repo_root: Path) -> None:
 
 
 def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    test_heatmap_color_scale_helper(repo_root)
+
     if importlib.util.find_spec("matplotlib") is None:
         print("Skipping plot_results smoke test: matplotlib is not installed")
         return SKIP_RETURN_CODE
 
-    repo_root = Path(__file__).resolve().parents[1]
     output_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else (
         repo_root / "build" / "plot_results_smoke"
     )
@@ -197,6 +235,11 @@ def main() -> int:
         "node_count",
         "epoch_count",
         "requests_per_node_per_epoch",
+        "workload_issue_mode",
+        "burst_size",
+        "burst_interval",
+        "intra_burst_gap",
+        "node_phase_jitter",
         "hot_set_mode",
         "hot_set_churn_fraction",
         "cross_node_overlap",
@@ -247,7 +290,8 @@ def main() -> int:
                     memory_wait: str,
                     channel_wait: str,
                     channel_depth: str,
-                    imbalance: str) -> dict[str, str]:
+                    imbalance: str,
+                    issue_mode: str = "completion_driven") -> dict[str, str]:
         row = {field: "" for field in channel_fields}
         row.update({
             "status": "success",
@@ -258,6 +302,11 @@ def main() -> int:
             "node_count": "8",
             "epoch_count": "16",
             "requests_per_node_per_epoch": "128",
+            "workload_issue_mode": issue_mode,
+            "burst_size": "4",
+            "burst_interval": "20",
+            "intra_burst_gap": "1",
+            "node_phase_jitter": "0",
             "hot_set_mode": "epoch_shift",
             "hot_set_churn_fraction": "0.2",
             "cross_node_overlap": "high",
@@ -346,6 +395,31 @@ def main() -> int:
              "calibration_channel_hotspot_pressure.svg").exists(),
             "Channel-hotspot calibration plot should be generated")
 
+    bursty_fixture = output_dir.parent / "aggregate_bursty_calibration.csv"
+    write_rows(
+        bursty_fixture,
+        channel_fields,
+        [
+            channel_row("eval_bursty_calibration", "comp_lru", "lru",
+                        "4", "2", "140", "35", "30000", "5", "1.1",
+                        "completion_driven"),
+            channel_row("eval_bursty_calibration", "burst_lru", "lru",
+                        "4", "2", "190", "75", "90000", "14", "2.8",
+                        "scheduled_bursty"),
+            channel_row("eval_bursty_calibration", "comp_remote",
+                        "always_remote", "4", "2", "210", "55",
+                        "50000", "8", "1.2", "completion_driven"),
+            channel_row("eval_bursty_calibration", "burst_remote",
+                        "always_remote", "4", "2", "330", "130",
+                        "160000", "22", "3.2", "scheduled_bursty"),
+        ],
+    )
+    bursty_dir = output_dir.parent / "plot_results_bursty_calibration"
+    run_plot_results(script, bursty_fixture, bursty_dir)
+    require((bursty_dir / "plots" /
+             "calibration_issue_mode_pressure.svg").exists(),
+            "Issue-mode calibration plot should be generated")
+
     viability_dir = output_dir.parent / "plot_results_viability"
     run_plot_results(
         script,
@@ -360,9 +434,40 @@ def main() -> int:
         viability_dir / "plots" / "viability_remote_pressure_by_churn.svg",
         viability_dir / "plots" / "viability_fairness_by_churn.svg",
         viability_dir / "plots" / "viability_scatter.svg",
+        viability_dir / "plots" / "viability_best_run_latency_examples.svg",
+        viability_dir / "plots" / "viability_best_run_pressure_examples.svg",
+        viability_dir / "viability_best_runs.csv",
+        viability_dir / "viability_best_run_policy_context.csv",
     ]
     for path in viability_files:
         require(path.exists(), f"Missing viability plot: {path}")
+    best_rows = read_rows(viability_dir / "viability_best_runs.csv")
+    best_policies = {row["target_policy"] for row in best_rows}
+    require("lru" not in best_policies,
+            "Best-run examples should exclude LRU baseline")
+    require("global_hottest_replication" not in best_policies,
+            "Best-run examples should exclude oracle replication")
+    require("always_remote" not in best_policies,
+            "Best-run examples should exclude always-remote baseline")
+    best_contention = next(
+        row for row in best_rows
+        if row["target_policy"] == "contention_aware_smoothed"
+    )
+    require(best_contention["hot_set_churn_fraction"] == "0.0",
+            "Contention best run should choose the lowest mean-latency delta")
+    require(best_contention["cache_capacity_hotset_multiplier"] == "0.25",
+            "Best-run CSV should preserve sweep values")
+    require(abs(float(best_contention["mean_latency_delta_pct"]) +
+                (20.0 / 120.0)) < 1e-6,
+            "Best-run selection should use mean latency delta")
+    context_rows = read_rows(
+        viability_dir / "viability_best_run_policy_context.csv",
+    )
+    context_policies = {row["comparison_policy"] for row in context_rows}
+    require("hotness_only_windowed" in context_policies,
+            "Best-run context should include peer cache policies")
+    require("global_hottest_replication" not in context_policies,
+            "Best-run context should exclude oracle policies")
     viability_report = (viability_dir / "report.md").read_text(
         encoding="utf-8",
     )
@@ -370,6 +475,10 @@ def main() -> int:
             "Viability report should auto-detect policy viability mode")
     require("Churn-Conditioned Policy Viability" in viability_report,
             "Viability report should group churn-conditioned plots")
+    require("Best Run Examples" in viability_report,
+            "Viability report should include best-run examples")
+    require("0.25" in viability_report,
+            "Best-run report table should include sweep values")
 
     single_churn_fixture = output_dir.parent / "aggregate_viability_single_churn.csv"
     with (repo_root / "tests" / "fixtures" /

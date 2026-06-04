@@ -86,12 +86,13 @@ void record_remote_object(Stats& stats,
                           std::uint64_t accesses,
                           dm_sim::SimTime queue_wait,
                           dm_sim::SimTime service_time,
-                          dm_sim::EpochId epoch_id = 0) {
+                          dm_sim::EpochId epoch_id = 0,
+                          std::uint64_t size_bytes = 8) {
     for (std::uint64_t i = 0; i < accesses; ++i) {
         const Request request = make_request(
             i + 1,
             object_id,
-            8,
+            size_bytes,
             epoch_id,
             static_cast<dm_sim::NodeId>(i + 1));
         stats.record_remote_access(request, 0, static_cast<std::size_t>(i + 1));
@@ -417,6 +418,65 @@ void test_contention_policy_scores_previous_epoch_contention() {
     assert(hot_score.total_score > cold_score.total_score);
 }
 
+void test_contention_policy_cost_density_values_remote_cost_per_byte() {
+    Stats stats;
+    record_remote_object(stats, 9501, 2, 20, 20, 0, 8);
+    record_remote_object(stats, 9502, 2, 20, 20, 0, 32);
+
+    ContentionPolicyConfig config = contention_config(0.0);
+    config.weights.cost_density_weight = 1.0;
+
+    ContentionAwarePolicy policy(config, 64, stats);
+    policy.on_epoch_start(1);
+
+    const auto dense_score = policy.score_object(9501, 8);
+    const auto sparse_score = policy.score_object(9502, 32);
+    assert(near(dense_score.cost_density, 1.0));
+    assert(near(dense_score.cost_per_cache_byte, 10.0));
+    assert(near(sparse_score.cost_density, 0.25));
+    assert(near(sparse_score.cost_per_cache_byte, 2.5));
+    assert(dense_score.total_score > sparse_score.total_score);
+}
+
+void test_contention_policy_cost_density_is_zero_without_size_telemetry() {
+    Stats stats;
+    const Request request = make_request(1, 9511, 8, 0);
+    stats.record_remote_access(request, 0, 1);
+    stats.record_object_queue_wait(request, 0, 20);
+
+    ContentionPolicyConfig config = contention_config(0.0);
+    config.weights.cost_density_weight = 1.0;
+
+    ContentionAwarePolicy policy(config, 64, stats);
+    policy.on_epoch_start(1);
+
+    const auto score = policy.score_object(9511, 8);
+    assert(near(score.cost_density, 0.0));
+    assert(near(score.cost_per_cache_byte, 0.0));
+    assert(near(score.total_score, 0.0));
+}
+
+void test_contention_policy_smoothed_cost_density_uses_older_epochs() {
+    Stats stats;
+    record_remote_object(stats, 9521, 2, 20, 20, 0, 8);
+    record_remote_object(stats, 9522, 2, 10, 10, 1, 8);
+
+    ContentionPolicyConfig config = contention_config(0.0);
+    config.variant = ContentionPolicyVariant::Smoothed;
+    config.telemetry_history_epochs = 2;
+    config.telemetry_decay = 1.0;
+    config.weights.cost_density_weight = 1.0;
+
+    ContentionAwarePolicy policy(config, 64, stats);
+    policy.on_epoch_start(2);
+
+    const auto older_score = policy.score_object(9521, 8);
+    const auto recent_score = policy.score_object(9522, 8);
+    assert(near(older_score.cost_density, 1.0));
+    assert(near(recent_score.cost_density, 0.5));
+    assert(older_score.total_score > recent_score.total_score);
+}
+
 void test_contention_policy_smoothed_variant_uses_older_prior_epochs() {
     Stats stats;
     record_remote_object(stats, 9401, 4, 0, 0, 0);
@@ -541,6 +601,9 @@ int main() {
     test_global_replica_installation_respects_capacity_and_replaces_entries();
     test_contention_policy_uses_local_hotness_for_epoch_zero();
     test_contention_policy_scores_previous_epoch_contention();
+    test_contention_policy_cost_density_values_remote_cost_per_byte();
+    test_contention_policy_cost_density_is_zero_without_size_telemetry();
+    test_contention_policy_smoothed_cost_density_uses_older_epochs();
     test_contention_policy_smoothed_variant_uses_older_prior_epochs();
     test_contention_policy_reuse_gated_variant_requires_local_demand();
     test_contention_policy_hysteresis_rejects_borderline_eviction();

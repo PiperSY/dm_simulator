@@ -91,11 +91,17 @@ EVAL_CHANNEL_HOTSPOT_POLICIES = (
     "contention_aware_smoothed",
 )
 
+EVAL_BURSTY_CALIBRATION_POLICIES = (
+    "always_remote",
+    "lru",
+)
+
 POLICIES = (
     *BASE_POLICIES,
     "hotness_only_cumulative",
     "hotness_only_windowed",
     *CONTENTION_VARIANT_POLICIES,
+    "contention_aware_size_value",
 )
 
 # Named bandwidth levels map to simulator units in write_yaml_config().
@@ -122,6 +128,7 @@ RUN_NAME_ALIASES = {
     "eval_interactions_cache_hotset": "int_cache_hotset",
     "eval_interactions_node_bandwidth": "int_node_bw",
     "contention_aware_smoothed": "ca_smoothed",
+    "contention_aware_size_value": "ca_size_value",
     "contention_aware_reuse_gated": "ca_reuse_gated",
     "contention_aware_hysteresis": "ca_hysteresis",
     "eval_knob_cache_pressure": "knob_cache",
@@ -131,6 +138,9 @@ RUN_NAME_ALIASES = {
     "eval_contention_weight_sensitivity": "weight_sensitivity",
     "eval_channel_calibration": "chcal",
     "eval_channel_hotspots": "chhot",
+    "eval_bursty_calibration": "burstcal",
+    "completion_driven": "comp",
+    "scheduled_bursty": "burst",
 }
 
 
@@ -156,6 +166,7 @@ DEFAULT_CONTENTION_WEIGHTS = {
     "queue_wait_weight": 2.0,
     "remote_service_time_weight": 1.0,
     "size_penalty_weight": 0.5,
+    "cost_density_weight": 0.0,
 }
 
 # Run names have strict filesystem length limits, so profiles use short tokens
@@ -167,6 +178,7 @@ CONTENTION_WEIGHT_NAME_TOKENS = {
     "queue_wait_weight": "qw",
     "remote_service_time_weight": "rs",
     "size_penalty_weight": "sp",
+    "cost_density_weight": "cd",
 }
 
 # Phase 4C uses one-at-a-time sweeps around the default scoring model. These are
@@ -216,6 +228,11 @@ AGGREGATE_COLUMNS = (
     "compute_node_count",
     "epoch_count",
     "requests_per_node_per_epoch",
+    "workload_issue_mode",
+    "burst_size",
+    "burst_interval",
+    "intra_burst_gap",
+    "node_phase_jitter",
     "hot_set_mode",
     "hot_set_churn_label",
     "hot_set_churn_fraction",
@@ -305,6 +322,13 @@ class MatrixPreset:
         link_latency_levels: Named one-way link-latency sweep values.
         requests_per_node_per_epoch_values: Epoch-length sweep, measured as
             requests issued by each compute node per epoch.
+        workload_issue_modes: Workload arrival process sweep. Completion-driven
+            preserves the historical response-paced model; scheduled_bursty
+            uses per-node planned arrivals that can overlap.
+        burst_sizes: Number of requests in one scheduled burst.
+        burst_intervals: Time between burst starts in scheduled_bursty mode.
+        intra_burst_gaps: Time between requests within one burst.
+        node_phase_jitters: Deterministic per-node/epoch phase jitter range.
         epoch_count_values: Synthetic workload epoch-count sweep values.
         hot_set_size_values: Hot objects per node per epoch sweep values.
         hot_access_probabilities: Probability sweep for targeting a node's
@@ -346,6 +370,11 @@ class MatrixPreset:
     hot_set_churn_fractions: tuple[float, ...]
     cross_node_overlaps: tuple[str, ...]
     object_size_modes: tuple[str, ...]
+    workload_issue_modes: tuple[str, ...] = ("completion_driven",)
+    burst_sizes: tuple[int, ...] = (4,)
+    burst_intervals: tuple[int, ...] = (100,)
+    intra_burst_gaps: tuple[int, ...] = (1,)
+    node_phase_jitters: tuple[int, ...] = (0,)
     memory_channel_counts: tuple[int, ...] = (1,)
     hot_object_channel_counts: tuple[int, ...] = (0,)
 
@@ -364,6 +393,12 @@ class MatrixRun:
         object_count: Size of the synthetic object universe.
         epoch_count: Number of synthetic workload epochs.
         requests_per_node_per_epoch: Workload epoch length for each node.
+        workload_issue_mode: Completion-driven or scheduled-bursty request
+            arrival model for this run.
+        burst_size: Number of planned arrivals per burst in bursty mode.
+        burst_interval: Time between burst starts in bursty mode.
+        intra_burst_gap: Time between requests inside one burst.
+        node_phase_jitter: Per-node/epoch deterministic jitter range.
         hot_set_size: Number of hot objects per node per epoch.
         hot_access_probability: Probability that a generated request targets
             that node's current hot set.
@@ -394,6 +429,11 @@ class MatrixRun:
     object_count: int
     epoch_count: int
     requests_per_node_per_epoch: int
+    workload_issue_mode: str
+    burst_size: int
+    burst_interval: int
+    intra_burst_gap: int
+    node_phase_jitter: int
     hot_set_size: int
     hot_access_probability: float
     hot_set_churn_fraction: float
@@ -524,19 +564,49 @@ PRESETS = {
         object_size_bytes=64,
         object_size_small_bytes=64,
         object_size_large_bytes=256,
-        large_object_probabilities=(0.2,),
+        large_object_probabilities=(0.1,),
         cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("mild", "moderate", "severe"),
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
-        requests_per_node_per_epoch_values=(256,),
-        epoch_count_values=(8,),
-        hot_set_size_values=(8,),
+        requests_per_node_per_epoch_values=(8,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
         hot_access_probabilities=(0.6, 0.8, 0.95),
         hot_set_mode="epoch_shift",
-        hot_set_churn_fractions=(0.5,),
+        hot_set_churn_fractions=(0.3,),
         cross_node_overlaps=("low", "medium", "high"),
-        object_size_modes=("fixed",),
+        object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts= (2,),
+    ),
+    # Policy evaluation matrix: compare practical baselines and
+    # contention-aware variants inside a known high-contention regime.
+    "eval_policy_viability": MatrixPreset(
+        name="eval_policy_viability",
+        memory_node_id=99,
+        cache_hit_latency=1,
+        compute_node_ids=tuple(range(1, 17)),
+        compute_node_count_values=(16,),
+        object_count_values=(256,),
+        object_size_bytes=64,
+        object_size_small_bytes=64,
+        object_size_large_bytes=256,
+        large_object_probabilities=(0.1,),
+        cache_capacity_hotset_multipliers=(0.1,0.2,0.3,0.4,0.5,0.6),
+        memory_bandwidth_levels=("severe",),
+        memory_base_latency_levels=("medium",),
+        link_latency_levels=("medium",),
+        requests_per_node_per_epoch_values=(4, 8, 16,),
+        epoch_count_values=(32,),
+        hot_set_size_values=(16,),
+        hot_access_probabilities=(0.8,),
+        hot_set_mode="epoch_shift",
+        hot_set_churn_fractions=(0.1, 0.2, 0.3, 0.4, 0.5),
+        cross_node_overlaps=("high",),
+        object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts= (2,),
     ),
     # Channel calibration: isolate how adding independent memory-channel FIFO
     # servers reduces the artificial global queueing of the original model.
@@ -566,6 +636,7 @@ PRESETS = {
         memory_channel_counts=(1, 2, 4, 8),
         hot_object_channel_counts=(0,),
     ),
+    
     # Channel hotspots: keep memory parallelism fixed, then concentrate hot
     # objects onto fewer channels to create localized resource contention.
     "eval_channel_hotspots": MatrixPreset(
@@ -594,10 +665,12 @@ PRESETS = {
         memory_channel_counts=(4,),
         hot_object_channel_counts=(1, 2, 4),
     ),
-    # Final evaluation policy matrix: compare practical baselines and
-    # contention-aware variants inside a known high-contention regime.
-    "eval_policy_viability": MatrixPreset(
-        name="eval_policy_viability",
+
+    # Bursty calibration: compare response-paced issue against planned burst
+    # arrivals in the existing channel-hotspot regime before using bursts for
+    # broader policy-viability claims.
+    "eval_bursty_calibration": MatrixPreset(
+        name="eval_bursty_calibration",
         memory_node_id=99,
         cache_hit_latency=1,
         compute_node_ids=tuple(range(1, 17)),
@@ -607,19 +680,27 @@ PRESETS = {
         object_size_small_bytes=64,
         object_size_large_bytes=256,
         large_object_probabilities=(0.1,),
-        cache_capacity_hotset_multipliers=(0.2, 0.3, 0.4, 0.5, 0.6),
+        cache_capacity_hotset_multipliers=(0.5,),
         memory_bandwidth_levels=("severe",),
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
         requests_per_node_per_epoch_values=(8,),
-        epoch_count_values=(32,),
+        workload_issue_modes=("completion_driven", "scheduled_bursty"),
+        burst_sizes=(4,),
+        burst_intervals=(20,),
+        intra_burst_gaps=(1,),
+        node_phase_jitters=(0,),
+        epoch_count_values=(16,),
         hot_set_size_values=(16,),
         hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
-        hot_set_churn_fractions=(0.05, 0.1, 0.2, 0.3, 0.4),
+        hot_set_churn_fractions=(0.2,),
         cross_node_overlaps=("high",),
         object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts=(2,),
     ),
+    
     # Interaction study 1: isolate how telemetry staleness changes when hot
     # sets churn faster or slower than the per-epoch reuse window.
     "eval_interactions_churn_epoch": MatrixPreset(
@@ -659,18 +740,20 @@ PRESETS = {
         object_size_small_bytes=64,
         object_size_large_bytes=256,
         large_object_probabilities=(0.1,),
-        cache_capacity_hotset_multipliers=(0.25, 0.5, 1.0, 2.0),
+        cache_capacity_hotset_multipliers=(0.2,0.4, 0.6, 0.8),
         memory_bandwidth_levels=("severe",),
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
-        requests_per_node_per_epoch_values=(256,),
+        requests_per_node_per_epoch_values=(4,),
         epoch_count_values=(32,),
         hot_set_size_values=(8, 16, 32),
         hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
-        hot_set_churn_fractions=(0.25,),
+        hot_set_churn_fractions=(0.3,),
         cross_node_overlaps=("high",),
         object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts= (2,),
     ),
     # Interaction study 3: isolate when architecture crosses from lightly
     # loaded to contended by varying demand sources and memory bandwidth.
@@ -689,14 +772,16 @@ PRESETS = {
         memory_bandwidth_levels=("mild", "moderate", "severe"),
         memory_base_latency_levels=("medium",),
         link_latency_levels=("medium",),
-        requests_per_node_per_epoch_values=(256,),
+        requests_per_node_per_epoch_values=(4,),
         epoch_count_values=(32,),
         hot_set_size_values=(16,),
         hot_access_probabilities=(0.8,),
         hot_set_mode="epoch_shift",
-        hot_set_churn_fractions=(0.25,),
+        hot_set_churn_fractions=(0.3,),
         cross_node_overlaps=("high",),
         object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts= (2,),
     ),
     # Knob demo 1: vary only cache capacity so presentation plots can show
     # where policies are starved, useful, or large enough for LRU to dominate.
@@ -724,6 +809,8 @@ PRESETS = {
         hot_set_churn_fractions=(0.2,),
         cross_node_overlaps=("high",),
         object_size_modes=("bimodal",),
+        memory_channel_counts=(4,),
+        hot_object_channel_counts= (2,),
     ),
     # Knob demo 2: vary per-epoch request volume to show how local reuse
     # opportunities change hotness and contention-aware policy behavior.
@@ -888,6 +975,8 @@ def parse_args() -> argparse.Namespace:
         --memory-channel-counts: Comma-separated memory-channel counts.
         --hot-object-channel-counts: Comma-separated hot-object channel limits;
             zero means unrestricted hot-object channel selection.
+        --workload-issue-modes and burst knobs: Optional workload-arrival
+            sweeps for comparing completion-driven and scheduled-bursty runs.
         --expect-runs: Optional dry-run assertion for generated run count.
         --dry-run: Generate configs and aggregate rows without simulation.
         --keep-going: Continue the matrix after a simulator failure.
@@ -950,6 +1039,31 @@ def parse_args() -> argparse.Namespace:
         "--epoch-counts",
         default=None,
         help="Comma-separated epoch counts overriding the preset.",
+    )
+    parser.add_argument(
+        "--workload-issue-modes",
+        default=None,
+        help="Comma-separated issue modes: completion_driven, scheduled_bursty.",
+    )
+    parser.add_argument(
+        "--burst-sizes",
+        default=None,
+        help="Comma-separated scheduled-burst sizes.",
+    )
+    parser.add_argument(
+        "--burst-intervals",
+        default=None,
+        help="Comma-separated times between scheduled burst starts.",
+    )
+    parser.add_argument(
+        "--intra-burst-gaps",
+        default=None,
+        help="Comma-separated times between requests in a burst.",
+    )
+    parser.add_argument(
+        "--node-phase-jitters",
+        default=None,
+        help="Comma-separated per-node phase jitter ranges.",
     )
     parser.add_argument(
         "--cache-hotset-multipliers",
@@ -1182,6 +1296,26 @@ def parse_object_size_modes(value: str) -> list[str]:
     return modes
 
 
+def parse_workload_issue_modes(value: str) -> list[str]:
+    """Parse synthetic workload issue-mode names."""
+
+    modes = parse_csv_list(value)
+    invalid = [
+        mode
+        for mode in modes
+        if mode not in {"completion_driven", "scheduled_bursty"}
+    ]
+    if invalid:
+        raise SystemExit(
+            "Invalid workload issue mode(s): "
+            + ", ".join(invalid)
+            + ". Expected completion_driven or scheduled_bursty"
+        )
+    if not modes:
+        raise SystemExit("At least one workload issue mode is required")
+    return modes
+
+
 def slug_float(value: float) -> str:
     """Convert a float into a path-safe token for run directory names."""
 
@@ -1252,6 +1386,11 @@ def run_slug(preset: MatrixPreset,
              object_count: int,
              epoch_count: int,
              epoch_length: int,
+             workload_issue_mode: str,
+             burst_size: int,
+             burst_interval: int,
+             intra_burst_gap: int,
+             node_phase_jitter: int,
              hot_set_size: int,
              hot_access_probability: float,
              churn_fraction: float,
@@ -1280,6 +1419,8 @@ def run_slug(preset: MatrixPreset,
         f"__objects-{object_count}"
         f"__epochs-{epoch_count}"
         f"__rpe-{epoch_length}"
+        f"__issue-{run_name_token(workload_issue_mode)}"
+        f"__burst-{burst_size}-{burst_interval}-{intra_burst_gap}-{node_phase_jitter}"
         f"__hotset-{hot_set_size}"
         f"__hotp-{slug_float(hot_access_probability)}"
         f"__mode-{preset.hot_set_mode}"
@@ -1321,6 +1462,11 @@ def build_runs(
     object_counts: list[int],
     epoch_counts: list[int],
     epoch_lengths: list[int],
+    workload_issue_modes: list[str],
+    burst_sizes: list[int],
+    burst_intervals: list[int],
+    intra_burst_gaps: list[int],
+    node_phase_jitters: list[int],
     hot_set_sizes: list[int],
     hot_access_probabilities: list[float],
     churn_fractions: list[float],
@@ -1350,6 +1496,11 @@ def build_runs(
         object_counts,
         epoch_counts,
         epoch_lengths,
+        workload_issue_modes,
+        burst_sizes,
+        burst_intervals,
+        intra_burst_gaps,
+        node_phase_jitters,
         hot_set_sizes,
         hot_access_probabilities,
         churn_fractions,
@@ -1369,6 +1520,11 @@ def build_runs(
          object_count,
          epoch_count,
          epoch_length,
+         workload_issue_mode,
+         burst_size,
+         burst_interval,
+         intra_burst_gap,
+         node_phase_jitter,
          hot_set_size,
          hot_access_probability,
          churn_fraction,
@@ -1383,6 +1539,13 @@ def build_runs(
          link_level) in dimensions:
         if hot_object_channel_count > memory_channel_count:
             continue
+        if (workload_issue_mode == "scheduled_bursty" and
+                burst_size > 1 and
+                burst_interval < (burst_size - 1) * intra_burst_gap):
+            raise SystemExit(
+                "Invalid scheduled_bursty timing: burst_interval must be at "
+                "least (burst_size - 1) * intra_burst_gap"
+            )
         # Most presets get the empty profile, but Phase 4C expands only
         # contention_aware_smoothed into 24 one-at-a-time weight overrides.
         for weight_profile in contention_weight_profiles_for_policy(
@@ -1398,6 +1561,11 @@ def build_runs(
                 object_count,
                 epoch_count,
                 epoch_length,
+                workload_issue_mode,
+                burst_size,
+                burst_interval,
+                intra_burst_gap,
+                node_phase_jitter,
                 hot_set_size,
                 hot_access_probability,
                 churn_fraction,
@@ -1421,6 +1589,11 @@ def build_runs(
                     object_count=object_count,
                     epoch_count=epoch_count,
                     requests_per_node_per_epoch=epoch_length,
+                    workload_issue_mode=workload_issue_mode,
+                    burst_size=burst_size,
+                    burst_interval=burst_interval,
+                    intra_burst_gap=intra_burst_gap,
+                    node_phase_jitter=node_phase_jitter,
                     hot_set_size=hot_set_size,
                     hot_access_probability=hot_access_probability,
                     hot_set_churn_fraction=churn_fraction,
@@ -1472,6 +1645,9 @@ def contention_variant_for_policy(policy: str) -> str | None:
         "contention_aware": "v1",
         "contention_aware_v1": "v1",
         "contention_aware_smoothed": "smoothed",
+        # Size-value experiments use smoothed telemetry so cost-per-byte
+        # scoring is not evaluated against a noisy one-epoch-only snapshot.
+        "contention_aware_size_value": "smoothed",
         "contention_aware_reuse_gated": "reuse_gated",
         "contention_aware_hysteresis": "hysteresis",
     }
@@ -1562,12 +1738,21 @@ def write_yaml_config(run: MatrixRun) -> None:
             lines.append("    history_window_epochs: 4")
     elif yaml_policy == "contention_aware":
         weights = contention_weights_for_profile(run.contention_weight_profile)
+        if run.policy == "contention_aware_size_value":
+            weights["cost_density_weight"] = 1.0
         lines.extend(
             [
                 "  contention:",
                 f"    variant: {contention_variant}",
             ]
         )
+        if run.policy == "contention_aware_size_value":
+            lines.extend(
+                [
+                    "    # Size-value uses smoothed telemetry plus cost density",
+                    "    # to reward high remote pain per cache byte.",
+                ]
+            )
         if run.contention_weight_profile.weight_name:
             lines.extend(
                 [
@@ -1583,6 +1768,7 @@ def write_yaml_config(run: MatrixRun) -> None:
                 f"    queue_wait_weight: {weights['queue_wait_weight']:g}",
                 f"    remote_service_time_weight: {weights['remote_service_time_weight']:g}",
                 f"    size_penalty_weight: {weights['size_penalty_weight']:g}",
+                f"    cost_density_weight: {weights['cost_density_weight']:g}",
                 "    min_admit_score: 1.0",
                 "    local_hotness_threshold: 2",
                 f"    reset_on_epoch_change: {yaml_bool(True)}",
@@ -1631,6 +1817,13 @@ def write_yaml_config(run: MatrixRun) -> None:
             f"  object_size_large_bytes: {preset.object_size_large_bytes}",
             f"  large_object_probability: {run.large_object_probability:g}",
             f"  requests_per_node_per_epoch: {run.requests_per_node_per_epoch}",
+            "  # completion_driven preserves response-paced issue. scheduled_bursty",
+            "  # lets compute nodes issue by planned arrival time within an epoch.",
+            f"  issue_mode: {run.workload_issue_mode}",
+            f"  burst_size: {run.burst_size}",
+            f"  burst_interval: {run.burst_interval}",
+            f"  intra_burst_gap: {run.intra_burst_gap}",
+            f"  node_phase_jitter: {run.node_phase_jitter}",
             f"  epoch_count: {run.epoch_count}",
             f"  hot_set_size: {run.hot_set_size}",
             f"  hot_access_probability: {run.hot_access_probability:g}",
@@ -1665,6 +1858,11 @@ def base_row(run: MatrixRun, status: str, error: str = "") -> dict[str, Any]:
         "compute_node_count": run.compute_node_count,
         "epoch_count": run.epoch_count,
         "requests_per_node_per_epoch": run.requests_per_node_per_epoch,
+        "workload_issue_mode": run.workload_issue_mode,
+        "burst_size": run.burst_size,
+        "burst_interval": run.burst_interval,
+        "intra_burst_gap": run.intra_burst_gap,
+        "node_phase_jitter": run.node_phase_jitter,
         "hot_set_mode": preset.hot_set_mode,
         "hot_set_churn_label": hot_set_churn_label(
             preset.hot_set_mode,
@@ -1958,6 +2156,11 @@ def verify_dry_run(
             f"capacity_bytes: {cache_capacity_bytes(run)}",
             f"object_count: {run.object_count}",
             f"epoch_count: {run.epoch_count}",
+            f"issue_mode: {run.workload_issue_mode}",
+            f"burst_size: {run.burst_size}",
+            f"burst_interval: {run.burst_interval}",
+            f"intra_burst_gap: {run.intra_burst_gap}",
+            f"node_phase_jitter: {run.node_phase_jitter}",
             f"hot_set_size: {run.hot_set_size}",
             f"hot_access_probability: {run.hot_access_probability:g}",
             f"hot_object_channel_count: {run.hot_object_channel_count}",
@@ -1991,6 +2194,8 @@ def verify_dry_run(
             expected_weights = contention_weights_for_profile(
                 run.contention_weight_profile,
             )
+            if run.policy == "contention_aware_size_value":
+                expected_weights["cost_density_weight"] = 1.0
             for weight_name, weight_value in expected_weights.items():
                 field = f"{weight_name}: {weight_value:g}"
                 if field not in config_text:
@@ -2058,6 +2263,8 @@ def main() -> int:
         if preset.name == "eval_channel_calibration"
         else EVAL_CHANNEL_HOTSPOT_POLICIES
         if preset.name == "eval_channel_hotspots"
+        else EVAL_BURSTY_CALIBRATION_POLICIES
+        if preset.name == "eval_bursty_calibration"
         else EVAL_POLICY_VIABILITY_POLICIES
         if preset.name == "eval_policy_viability"
         else EVAL_INTERACTION_POLICIES
@@ -2092,6 +2299,31 @@ def main() -> int:
         parse_positive_ints(args.epoch_counts)
         if args.epoch_counts is not None
         else list(preset.epoch_count_values)
+    )
+    workload_issue_modes = (
+        parse_workload_issue_modes(args.workload_issue_modes)
+        if args.workload_issue_modes is not None
+        else list(preset.workload_issue_modes)
+    )
+    burst_sizes = (
+        parse_positive_ints(args.burst_sizes)
+        if args.burst_sizes is not None
+        else list(preset.burst_sizes)
+    )
+    burst_intervals = (
+        parse_positive_ints(args.burst_intervals)
+        if args.burst_intervals is not None
+        else list(preset.burst_intervals)
+    )
+    intra_burst_gaps = (
+        parse_nonnegative_ints(args.intra_burst_gaps)
+        if args.intra_burst_gaps is not None
+        else list(preset.intra_burst_gaps)
+    )
+    node_phase_jitters = (
+        parse_nonnegative_ints(args.node_phase_jitters)
+        if args.node_phase_jitters is not None
+        else list(preset.node_phase_jitters)
     )
     hot_set_sizes = (
         parse_positive_ints(args.hot_set_sizes)
@@ -2187,6 +2419,11 @@ def main() -> int:
                       object_counts,
                       epoch_counts,
                       epoch_lengths,
+                      workload_issue_modes,
+                      burst_sizes,
+                      burst_intervals,
+                      intra_burst_gaps,
+                      node_phase_jitters,
                       hot_set_sizes,
                       hot_access_probabilities,
                       churn_fractions,

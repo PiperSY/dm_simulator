@@ -27,6 +27,7 @@ public:
     ComputeNode(NodeId node_id,
                 NodeId memory_node_id,
                 WorkloadCursor workload,
+                WorkloadIssueMode issue_mode,
                 SimTime one_way_link_latency,
                 SimTime local_cache_hit_latency,
                 LocalCache local_cache,
@@ -46,6 +47,7 @@ public:
     [[nodiscard]] std::size_t issued_requests() const noexcept;
     [[nodiscard]] const LocalCache& local_cache() const noexcept;
     [[nodiscard]] std::optional<EpochId> next_request_epoch() const;
+    [[nodiscard]] SimTime next_request_issue_offset() const;
     [[nodiscard]] std::vector<PolicyDecisionRecord> policy_diagnostics() const;
     // Copies local-cache lifecycle diagnostics so Simulator can aggregate all
     // compute nodes without exposing mutable cache internals.
@@ -60,12 +62,14 @@ private:
     void handle_return_response(const Event& event, Scheduler& scheduler);
     void handle_request_complete(const Event& event, Scheduler& scheduler);
     void start_epoch_if_needed(EpochId epoch_id, SimTime event_time);
+    void schedule_next_bursty_request_if_ready(Scheduler& scheduler);
 
     // Compute node attributes, including its ID, associated memory node ID, workload cursor for generating requests, latencies for link and cache hits, 
     //   local cache instance, references to shared request table and responses vector, statistics collector, and counters for outstanding and issued requests.
     NodeId node_id_;
     NodeId memory_node_id_;
     WorkloadCursor workload_;
+    WorkloadIssueMode issue_mode_ = WorkloadIssueMode::CompletionDriven;
     SimTime one_way_link_latency_ = 0;
     SimTime local_cache_hit_latency_ = 0;
     LocalCache local_cache_;
@@ -75,6 +79,7 @@ private:
     std::vector<Response>& responses_;
     Stats& stats_;
     std::optional<EpochId> current_epoch_;
+    SimTime current_epoch_start_time_ = 0;
     std::size_t outstanding_requests_ = 0;
 };
 

@@ -42,6 +42,7 @@ struct ContentionPolicyWeights {
     double queue_wait_weight = 2.0;
     double remote_service_time_weight = 1.0;
     double size_penalty_weight = 0.5;
+    double cost_density_weight = 0.0;
 };
 
 enum class ContentionPolicyVariant {

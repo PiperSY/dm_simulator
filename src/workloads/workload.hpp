@@ -30,6 +30,13 @@ enum class ObjectSizeMode {
     Bimodal,
 };
 
+// Controls whether a node issues the next request only after completion, or
+// follows a precomputed arrival schedule that can create overlapping bursts.
+enum class WorkloadIssueMode {
+    CompletionDriven,
+    ScheduledBursty,
+};
+
 // Parameters used to synthesize per-node request streams.
 struct SyntheticWorkloadConfig {
     // Seed for deterministic object shuffling and request selection.
@@ -54,6 +61,13 @@ struct SyntheticWorkloadConfig {
     std::uint64_t object_size_small_bytes = 64;
     std::uint64_t object_size_large_bytes = 256;
     double large_object_probability = 0.1;
+    WorkloadIssueMode issue_mode = WorkloadIssueMode::CompletionDriven;
+    // Burst knobs are interpreted only in scheduled_bursty mode. They shape
+    // arrival timing but do not change object selection or epoch hot sets.
+    std::size_t burst_size = 4;
+    SimTime burst_interval = 100;
+    SimTime intra_burst_gap = 1;
+    SimTime node_phase_jitter = 0;
     // Number of requests generated for each node during each epoch.
     std::size_t requests_per_node_per_epoch = 0;
     // Number of epochs to generate.

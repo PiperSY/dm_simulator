@@ -29,6 +29,7 @@ PREFERRED_POLICY_ORDER = (
     "contention_aware",
     "contention_aware_v1",
     "contention_aware_smoothed",
+    "contention_aware_size_value",
     "contention_aware_reuse_gated",
     "contention_aware_hysteresis",
 )
@@ -39,6 +40,11 @@ GROUP_COLUMNS = (
     "node_count",
     "epoch_count",
     "requests_per_node_per_epoch",
+    "workload_issue_mode",
+    "burst_size",
+    "burst_interval",
+    "intra_burst_gap",
+    "node_phase_jitter",
     "hot_set_mode",
     "hot_set_churn_fraction",
     "cross_node_overlap",
@@ -167,6 +173,76 @@ CONDITION_COLUMNS = (
     "avg_estimated_avoided_contention_cost",
 )
 
+BEST_RUN_BASELINE_POLICIES = {
+    "always_remote",
+    "lru",
+    "global_hottest_replication",
+}
+
+BEST_RUN_COLUMNS = (
+    "target_policy",
+    "latency_improvement_pct",
+    "mean_latency_delta_pct",
+    "p99_latency_delta_pct",
+    "local_hit_rate",
+    "local_hit_rate_delta",
+    "average_memory_wait_delta_pct",
+    "total_remote_accesses_delta_pct",
+    "admission_yield",
+    "reuse_after_admit_rate",
+    "stale_telemetry_rate",
+    "average_top_object_overlap",
+    "best_experiment_name",
+    "best_output_dir",
+    "preset",
+    "seed",
+    "node_count",
+    "epoch_count",
+    "requests_per_node_per_epoch",
+    "hot_set_churn_fraction",
+    "cache_capacity_hotset_multiplier",
+    "cache_capacity_bytes",
+    "hot_set_size",
+    "hot_access_probability",
+    "cross_node_overlap",
+    "object_count",
+    "object_size_mode",
+    "object_size_bytes",
+    "object_size_small_bytes",
+    "object_size_large_bytes",
+    "large_object_probability",
+    "memory_channel_count",
+    "hot_object_channel_count",
+    "memory_bandwidth_level",
+    "memory_bandwidth_bytes_per_time",
+    "memory_base_latency_level",
+    "memory_base_latency",
+    "link_latency_level",
+    "one_way_link_latency",
+)
+
+BEST_RUN_CONTEXT_COLUMNS = (
+    "target_policy",
+    "comparison_policy",
+    "is_target_policy",
+    "latency_improvement_pct",
+    "mean_latency_delta_pct",
+    "p99_latency_delta_pct",
+    "local_hit_rate",
+    "local_hit_rate_delta",
+    "average_memory_wait",
+    "average_memory_wait_delta_pct",
+    "total_remote_accesses",
+    "total_remote_accesses_delta_pct",
+    "admission_yield",
+    "reuse_after_admit_rate",
+    "stale_telemetry_rate",
+    "average_top_object_overlap",
+    "experiment_name",
+    "output_dir",
+    *GROUP_COLUMNS,
+)
+
 CONDITION_DIMENSIONS = (
     "hot_set_churn_fraction",
     "requests_per_node_per_epoch",
@@ -176,6 +252,11 @@ CONDITION_DIMENSIONS = (
     "hot_set_size",
     "hot_access_probability",
     "large_object_probability",
+    "workload_issue_mode",
+    "burst_size",
+    "burst_interval",
+    "intra_burst_gap",
+    "node_phase_jitter",
     "cache_capacity_hotset_multiplier",
     # These are condition/report dimensions only. They are not baseline-match
     # keys because the baseline run has blank weight metadata by design.
@@ -210,6 +291,7 @@ CATEGORICAL_ORDER = {
     "memory_base_latency_level": ("low", "medium", "high"),
     "link_latency_level": ("low", "medium", "high"),
     "cross_node_overlap": ("low", "medium", "high"),
+    "workload_issue_mode": ("completion_driven", "scheduled_bursty"),
     # Keep weight facets in the same order as the policy scoring formula so the
     # sensitivity report reads from local evidence through remote-cost signals.
     "contention_weight_name": (
@@ -373,7 +455,9 @@ def detect_report_mode(rows: list[dict[str, str]], requested: str) -> str:
     if len(presets) != 1:
         return "generic"
     preset = presets[0]
-    if preset == "eval_contention_calibration" or preset.startswith("eval_channel_"):
+    if (preset == "eval_contention_calibration" or
+            preset == "eval_bursty_calibration" or
+            preset.startswith("eval_channel_")):
         return "contention_calibration"
     if preset == "eval_policy_viability":
         return "policy_viability"
@@ -700,6 +784,14 @@ def ordered_policies(rows: list[dict[str, Any]]) -> list[str]:
     return ordered
 
 
+def policy_order_key(policy: str) -> tuple[int, Any]:
+    """Sort a single policy label with the same order used in plots."""
+
+    if policy in PREFERRED_POLICY_ORDER:
+        return (0, PREFERRED_POLICY_ORDER.index(policy))
+    return (1, policy)
+
+
 def build_policy_summary(
     comparison_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -836,6 +928,196 @@ def build_condition_summary(
                 }
             )
     return summaries
+
+
+def latency_improvement_pct(row: dict[str, Any]) -> float | None:
+    """Return positive-is-better latency improvement versus the baseline."""
+
+    delta = value_for_plot(row, "mean_latency_delta_pct")
+    if delta is None:
+        return None
+    return -100.0 * delta
+
+
+def is_best_run_policy(row: dict[str, Any]) -> bool:
+    """Return whether a policy should be considered for best-run examples."""
+
+    policy = str(row.get("policy", ""))
+    if policy in BEST_RUN_BASELINE_POLICIES:
+        return False
+    return value_for_plot(row, "mean_latency_delta_pct") is not None
+
+
+def best_run_sort_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
+    """Deterministically rank rows for a policy's best example condition."""
+
+    mean_delta = value_for_plot(row, "mean_latency_delta_pct")
+    p99_delta = value_for_plot(row, "p99_latency_delta_pct")
+    hit_rate = value_for_plot(row, "local_hit_rate")
+    return (
+        mean_delta if mean_delta is not None else float("inf"),
+        p99_delta if p99_delta is not None else float("inf"),
+        -(hit_rate if hit_rate is not None else -1.0),
+        str(row.get("experiment_name", "")),
+    )
+
+
+def best_run_summary_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Build the compact audit row for one policy's best condition."""
+
+    summary = {
+        column: row.get(column, "")
+        for column in BEST_RUN_COLUMNS
+        if column in GROUP_COLUMNS
+    }
+    summary.update(
+        {
+            "target_policy": row.get("policy", ""),
+            "latency_improvement_pct": latency_improvement_pct(row),
+            "mean_latency_delta_pct": value_for_plot(
+                row,
+                "mean_latency_delta_pct",
+            ),
+            "p99_latency_delta_pct": value_for_plot(
+                row,
+                "p99_latency_delta_pct",
+            ),
+            "local_hit_rate": value_for_plot(row, "local_hit_rate"),
+            "local_hit_rate_delta": value_for_plot(
+                row,
+                "local_hit_rate_delta",
+            ),
+            "average_memory_wait_delta_pct": value_for_plot(
+                row,
+                "average_memory_wait_delta_pct",
+            ),
+            "total_remote_accesses_delta_pct": value_for_plot(
+                row,
+                "total_remote_accesses_delta_pct",
+            ),
+            "admission_yield": value_for_plot(row, "admission_yield"),
+            "reuse_after_admit_rate": value_for_plot(
+                row,
+                "reuse_after_admit_rate",
+            ),
+            "stale_telemetry_rate": value_for_plot(
+                row,
+                "stale_telemetry_rate",
+            ),
+            "average_top_object_overlap": value_for_plot(
+                row,
+                "average_top_object_overlap",
+            ),
+            "best_experiment_name": row.get("experiment_name", ""),
+            "best_output_dir": row.get("output_dir", ""),
+        }
+    )
+    return summary
+
+
+def best_run_context_row(target_policy: str,
+                         row: dict[str, Any]) -> dict[str, Any]:
+    """Build one comparison-policy row for a target policy's best condition."""
+
+    context = {
+        column: row.get(column, "")
+        for column in BEST_RUN_CONTEXT_COLUMNS
+        if column in GROUP_COLUMNS
+    }
+    comparison_policy = str(row.get("policy", ""))
+    context.update(
+        {
+            "target_policy": target_policy,
+            "comparison_policy": comparison_policy,
+            "is_target_policy": comparison_policy == target_policy,
+            "latency_improvement_pct": latency_improvement_pct(row),
+            "mean_latency_delta_pct": value_for_plot(
+                row,
+                "mean_latency_delta_pct",
+            ),
+            "p99_latency_delta_pct": value_for_plot(
+                row,
+                "p99_latency_delta_pct",
+            ),
+            "local_hit_rate": value_for_plot(row, "local_hit_rate"),
+            "local_hit_rate_delta": value_for_plot(
+                row,
+                "local_hit_rate_delta",
+            ),
+            "average_memory_wait": value_for_plot(
+                row,
+                "average_memory_wait",
+            ),
+            "average_memory_wait_delta_pct": value_for_plot(
+                row,
+                "average_memory_wait_delta_pct",
+            ),
+            "total_remote_accesses": value_for_plot(
+                row,
+                "total_remote_accesses",
+            ),
+            "total_remote_accesses_delta_pct": value_for_plot(
+                row,
+                "total_remote_accesses_delta_pct",
+            ),
+            "admission_yield": value_for_plot(row, "admission_yield"),
+            "reuse_after_admit_rate": value_for_plot(
+                row,
+                "reuse_after_admit_rate",
+            ),
+            "stale_telemetry_rate": value_for_plot(
+                row,
+                "stale_telemetry_rate",
+            ),
+            "average_top_object_overlap": value_for_plot(
+                row,
+                "average_top_object_overlap",
+            ),
+            "experiment_name": row.get("experiment_name", ""),
+            "output_dir": row.get("output_dir", ""),
+        }
+    )
+    return context
+
+
+def build_best_run_examples(
+    comparison_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Find each non-baseline policy's best row and matched peer context."""
+
+    by_policy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_group: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for row in comparison_rows:
+        by_group[group_key(row)].append(row)
+        if is_best_run_policy(row):
+            by_policy[str(row.get("policy", ""))].append(row)
+
+    best_rows: list[dict[str, Any]] = []
+    for policy in ordered_policies(
+        [{"policy": policy} for policy in by_policy.keys()]
+    ):
+        policy_rows = by_policy.get(policy, [])
+        if policy_rows:
+            best_rows.append(min(policy_rows, key=best_run_sort_key))
+
+    summary_rows: list[dict[str, Any]] = []
+    context_rows: list[dict[str, Any]] = []
+    for best_row in best_rows:
+        target_policy = str(best_row.get("policy", ""))
+        summary_rows.append(best_run_summary_row(best_row))
+        # Best-run examples are high-water marks, not averages: show every
+        # practical cache policy at the exact same matched matrix condition.
+        peer_rows = [
+            row for row in by_group[group_key(best_row)]
+            if is_best_run_policy(row)
+        ]
+        for row in sorted(
+            peer_rows,
+            key=lambda item: policy_order_key(str(item.get("policy", ""))),
+        ):
+            context_rows.append(best_run_context_row(target_policy, row))
+
+    return summary_rows, context_rows
 
 
 def value_for_plot(row: dict[str, Any], column: str) -> float | None:
@@ -1170,6 +1452,29 @@ def average_by_key(rows: list[dict[str, Any]],
     }
 
 
+def heatmap_color_scale(metric_column: str,
+                        values: list[float]) -> tuple[float, float, str]:
+    """Return shared color limits and colormap for a heatmap figure."""
+
+    finite_values = [value for value in values if math.isfinite(value)]
+    if not finite_values:
+        return (0.0, 1.0, "viridis")
+
+    if metric_column.endswith("_delta_pct") or "delta" in metric_column:
+        max_abs = max(abs(min(finite_values)), abs(max(finite_values)))
+        if max_abs == 0.0:
+            max_abs = 1.0
+        return (-max_abs, max_abs, "coolwarm")
+
+    minimum = min(finite_values)
+    maximum = max(finite_values)
+    if minimum == maximum:
+        padding = abs(minimum) * 0.05 or 1.0
+        minimum -= padding
+        maximum += padding
+    return (minimum, maximum, "viridis")
+
+
 def heatmap_by_policy(plt: Any,
                       rows: list[dict[str, Any]],
                       x_column: str,
@@ -1188,17 +1493,12 @@ def heatmap_by_policy(plt: Any,
     if not xs or not ys or not policies:
         return plot_placeholder(plt, title, "No data available for this plot.")
 
-    fig, axes = plt.subplots(
-        1,
-        len(policies),
-        figsize=(max(7, 4.5 * len(policies)), 5),
-        squeeze=False,
-    )
     averaged = average_by_key(rows, ("policy", y_column, x_column),
                               metric_column)
-    images = []
+    matrices: dict[str, list[list[float]]] = {}
+    plotted_values: list[float] = []
     any_data = False
-    for ax, policy in zip(axes.flat, policies):
+    for policy in policies:
         matrix: list[list[float]] = []
         for y_value in ys:
             row_values = []
@@ -1206,19 +1506,42 @@ def heatmap_by_policy(plt: Any,
                 value = averaged.get((policy, y_value, x_value))
                 if value is None:
                     row_values.append(math.nan)
-                else:
-                    any_data = True
-                    row_values.append(value * scale)
+                    continue
+                any_data = True
+                scaled_value = value * scale
+                plotted_values.append(scaled_value)
+                row_values.append(scaled_value)
             matrix.append(row_values)
-        image = ax.imshow(matrix, aspect="auto")
+        matrices[policy] = matrix
+
+    if not any_data:
+        return plot_placeholder(plt, title, "No data available for this plot.")
+
+    vmin, vmax, cmap = heatmap_color_scale(metric_column, plotted_values)
+    fig, axes = plt.subplots(
+        1,
+        len(policies),
+        figsize=(max(9, 5.1 * len(policies)), 5.8),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    images = []
+    for policy_index, (ax, policy) in enumerate(zip(axes.flat, policies)):
+        matrix = matrices[policy]
+        image = ax.imshow(matrix, aspect="auto", vmin=vmin, vmax=vmax,
+                          cmap=cmap)
         images.append(image)
         ax.set_title(policy)
         ax.set_xticks(range(len(xs)))
         ax.set_xticklabels(xs, rotation=30, ha="right")
         ax.set_yticks(range(len(ys)))
-        ax.set_yticklabels(ys)
         ax.set_xlabel(x_label)
-        ax.set_ylabel(y_label)
+        if policy_index == 0:
+            ax.set_yticklabels(ys)
+            ax.set_ylabel(y_label, labelpad=12)
+        else:
+            ax.set_yticklabels([])
+            ax.tick_params(axis="y", length=0)
         for y_index, row_values in enumerate(matrix):
             for x_index, value in enumerate(row_values):
                 if math.isfinite(value):
@@ -1228,15 +1551,12 @@ def heatmap_by_policy(plt: Any,
                         f"{value:.1f}",
                         ha="center",
                         va="center",
-                        fontsize="x-small",
+                            fontsize="x-small",
                     )
     fig.suptitle(title)
     if images:
         fig.colorbar(images[0], ax=list(axes.flat), shrink=0.8,
                      label=metric_label)
-    if not any_data:
-        plt.close(fig)
-        return plot_placeholder(plt, title, "No data available for this plot.")
     return fig
 
 
@@ -1405,6 +1725,32 @@ def calibration_channel_count_pressure_plot(
         ],
         "Memory pressure as channel parallelism changes",
         "Memory channel count",
+    )
+
+
+def calibration_issue_mode_pressure_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Compare response-paced issue with planned burst arrivals."""
+
+    # Issue mode changes arrival timing, not the object stream. These pressure
+    # panels show whether the timing change actually creates sharper queues.
+    return line_sweep_plot(
+        plt,
+        comparison_rows,
+        "workload_issue_mode",
+        [
+            ("average_memory_wait", "Average memory wait", 1.0),
+            ("total_queue_wait", "Total queue wait", 1.0),
+            ("peak_memory_channel_queue_depth",
+             "Peak channel queue depth",
+             1.0),
+            ("p99_latency", "P99 latency", 1.0),
+        ],
+        "Memory pressure by workload issue mode",
+        "Workload issue mode",
+        numeric_x=False,
     )
 
 
@@ -1786,10 +2132,191 @@ def make_viability_scatter(plt: Any,
         ax.scatter(xs, ys, s=sizes, alpha=0.75, label=policy)
     ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.4)
     ax.set_title("Contention-aware viability signals")
-    ax.set_xlabel("Stale telemetry rate")
+    ax.set_xlabel("Hot-set-sized stale telemetry rate")
     ax.set_ylabel("Mean latency improvement vs baseline (%)")
     ax.legend(fontsize="small")
     ax.grid(alpha=0.3)
+    return fig
+
+
+def best_run_targets(context_rows: list[dict[str, Any]]) -> list[str]:
+    """Return target policies represented in best-run context rows."""
+
+    targets = {
+        str(row.get("target_policy", ""))
+        for row in context_rows
+        if str(row.get("target_policy", ""))
+    }
+    return sorted(targets, key=policy_order_key)
+
+
+def best_run_condition_label(row: dict[str, Any]) -> str:
+    """Format the most important sweep values for a best-run panel title."""
+
+    parts = []
+    for column, label in (
+        ("hot_set_churn_fraction", "churn"),
+        ("cache_capacity_hotset_multiplier", "cachex"),
+        ("requests_per_node_per_epoch", "rpe"),
+        ("large_object_probability", "large-p"),
+    ):
+        value = str(row.get(column, "")).strip()
+        if value:
+            parts.append(f"{label}={value}")
+    return ", ".join(parts)
+
+
+def sorted_best_context_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order peer-policy rows consistently inside best-run example panels."""
+
+    return sorted(
+        rows,
+        key=lambda row: policy_order_key(str(row.get("comparison_policy", ""))),
+    )
+
+
+def make_best_run_latency_examples_plot(
+    plt: Any,
+    context_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot peer policies at each target policy's best latency condition."""
+
+    targets = best_run_targets(context_rows)
+    if not targets:
+        return plot_placeholder(
+            plt,
+            "Best-run latency examples",
+            "No non-baseline best-run examples were available.",
+        )
+
+    columns = min(3, len(targets))
+    rows = math.ceil(len(targets) / columns)
+    fig, axes = plt.subplots(
+        rows,
+        columns,
+        figsize=(max(10, 4.8 * columns), max(4.5, 4.1 * rows)),
+        squeeze=False,
+    )
+    any_data = False
+    for index, target_policy in enumerate(targets):
+        ax = axes.flat[index]
+        target_rows = sorted_best_context_rows([
+            row for row in context_rows
+            if row.get("target_policy") == target_policy
+        ])
+        policies = [str(row.get("comparison_policy", "")) for row in target_rows]
+        values = [value_for_plot(row, "latency_improvement_pct")
+                  for row in target_rows]
+        if any(value is not None for value in values):
+            any_data = True
+        heights = [value if value is not None else 0.0 for value in values]
+        colors = [
+            "tab:orange" if row.get("is_target_policy") is True else "tab:blue"
+            for row in target_rows
+        ]
+        ax.bar(range(len(policies)), heights, color=colors)
+        ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+        label = best_run_condition_label(target_rows[0]) if target_rows else ""
+        ax.set_title(f"{target_policy}\n{label}")
+        ax.set_ylabel("Mean latency improvement vs baseline (%)")
+        ax.set_xticks(range(len(policies)))
+        ax.set_xticklabels(policies, rotation=30, ha="right")
+        ax.grid(axis="y", alpha=0.3)
+
+    for index in range(len(targets), rows * columns):
+        axes.flat[index].axis("off")
+    fig.suptitle("Best individual run for each non-baseline policy")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.95])
+    if not any_data:
+        plt.close(fig)
+        return plot_placeholder(
+            plt,
+            "Best-run latency examples",
+            "No latency-improvement values were available.",
+        )
+    return fig
+
+
+def make_best_run_pressure_examples_plot(
+    plt: Any,
+    context_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot cache and remote-pressure context for each best-run condition."""
+
+    targets = best_run_targets(context_rows)
+    if not targets:
+        return plot_placeholder(
+            plt,
+            "Best-run pressure examples",
+            "No non-baseline best-run examples were available.",
+        )
+
+    metrics = [
+        ("local_hit_rate", "Local hit rate", 1.0),
+        (
+            "average_memory_wait_delta_pct",
+            "Memory-wait reduction vs baseline (%)",
+            -100.0,
+        ),
+        (
+            "total_remote_accesses_delta_pct",
+            "Remote-access reduction vs baseline (%)",
+            -100.0,
+        ),
+    ]
+    fig, axes = plt.subplots(
+        len(metrics),
+        len(targets),
+        figsize=(max(10, 4.4 * len(targets)), 10.5),
+        squeeze=False,
+    )
+    any_data = False
+    for column_index, target_policy in enumerate(targets):
+        target_rows = sorted_best_context_rows([
+            row for row in context_rows
+            if row.get("target_policy") == target_policy
+        ])
+        policies = [str(row.get("comparison_policy", "")) for row in target_rows]
+        colors = [
+            "tab:orange" if row.get("is_target_policy") is True else "tab:blue"
+            for row in target_rows
+        ]
+        for row_index, (metric_column, label, scale) in enumerate(metrics):
+            ax = axes[row_index][column_index]
+            values = [
+                value_for_plot(row, metric_column)
+                for row in target_rows
+            ]
+            if any(value is not None for value in values):
+                any_data = True
+            heights = [
+                scale * value if value is not None else 0.0
+                for value in values
+            ]
+            ax.bar(range(len(policies)), heights, color=colors)
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.4)
+            if row_index == 0:
+                condition = (
+                    best_run_condition_label(target_rows[0])
+                    if target_rows
+                    else ""
+                )
+                ax.set_title(f"{target_policy}\n{condition}")
+            if column_index == 0:
+                ax.set_ylabel(label)
+            ax.set_xticks(range(len(policies)))
+            ax.set_xticklabels(policies, rotation=30, ha="right")
+            ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Cache and remote-pressure context at best-run conditions")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
+    if not any_data:
+        plt.close(fig)
+        return plot_placeholder(
+            plt,
+            "Best-run pressure examples",
+            "No pressure-context values were available.",
+        )
     return fig
 
 
@@ -1812,7 +2339,7 @@ def viability_admission_quality_plot(
     plots = [
         ("avg_admission_yield", "Admission yield", "Future hits / placement"),
         ("avg_reuse_after_admit_rate", "Reuse-after-admit rate", "Rate"),
-        ("avg_stale_telemetry_rate", "Stale telemetry rate", "Rate"),
+        ("avg_stale_telemetry_rate", "Hot-set-sized stale telemetry", "Rate"),
         ("avg_eviction_regret_count", "Eviction regret count", "Count"),
     ]
     for ax, (column, title, ylabel) in zip(axes.flat, plots):
@@ -1997,7 +2524,9 @@ def generate_generic_plots(plt: Any,
                         ("mean_latency_delta_pct",
                          "Mean latency delta (%)",
                          100.0),
-                        ("stale_telemetry_rate", "Stale telemetry rate", 1.0),
+                        ("stale_telemetry_rate",
+                         "Hot-set-sized stale telemetry",
+                         1.0),
                     ],
                     "Temporal stability sweep",
                     "Hot-set churn fraction",
@@ -2128,6 +2657,16 @@ def generate_contention_calibration_plots(
                 ),
             )
         )
+    if "workload_issue_mode" in swept:
+        plot_specs.append(
+            (
+                "calibration_issue_mode_pressure",
+                calibration_issue_mode_pressure_plot(
+                    plt,
+                    comparison_rows,
+                ),
+            )
+        )
     if "hot_object_channel_count" in swept:
         plot_specs.append(
             (
@@ -2195,11 +2734,13 @@ def generate_policy_viability_plots(
     comparison_rows: list[dict[str, Any]],
     policy_summary: list[dict[str, Any]],
     swept: set[str],
+    best_run_context: list[dict[str, Any]],
 ) -> list[PlotOutput]:
     """Generate plots for contention-aware policy viability studies."""
 
     plot_specs: list[tuple[str, Any]] = []
     conditioned_specs: list[tuple[str, Any]] = []
+    best_run_specs: list[tuple[str, Any]] = []
     if {"hot_set_churn_fraction",
             "requests_per_node_per_epoch"}.issubset(swept):
         rows = [
@@ -2297,6 +2838,18 @@ def generate_policy_viability_plots(
              viability_admission_quality_plot(plt, policy_summary)),
         ]
     )
+    best_run_specs.extend(
+        [
+            (
+                "viability_best_run_latency_examples",
+                make_best_run_latency_examples_plot(plt, best_run_context),
+            ),
+            (
+                "viability_best_run_pressure_examples",
+                make_best_run_pressure_examples_plot(plt, best_run_context),
+            ),
+        ]
+    )
     outputs = save_plot_specs(
         plt,
         plots_dir,
@@ -2311,6 +2864,15 @@ def generate_policy_viability_plots(
             formats,
             "Churn-Conditioned Policy Viability",
             conditioned_specs,
+        )
+    )
+    outputs.extend(
+        save_plot_specs(
+            plt,
+            plots_dir,
+            formats,
+            "Best Run Examples",
+            best_run_specs,
         )
     )
     return outputs
@@ -2585,7 +3147,8 @@ def generate_plots(plt: Any,
                    comparison_rows: list[dict[str, Any]],
                    policy_summary: list[dict[str, Any]],
                    report_mode: str,
-                   dimensions: dict[str, dict[str, Any]]) -> list[PlotOutput]:
+                   dimensions: dict[str, dict[str, Any]],
+                   best_run_context: list[dict[str, Any]]) -> list[PlotOutput]:
     """Generate common and mode-specific plot bundles."""
 
     plots_dir = output_dir / "plots"
@@ -2617,6 +3180,7 @@ def generate_plots(plt: Any,
                 comparison_rows,
                 policy_summary,
                 swept,
+                best_run_context,
             )
         )
     elif report_mode == "interaction":
@@ -2845,9 +3409,9 @@ def build_observations(
         low_stale_wins = count_class(low_stale, "win")
         high_stale_losses = count_class(high_stale, "loss")
         observations.append(
-            "Contention-aware rows with low stale telemetry produced "
-            f"{low_stale_wins}/{len(low_stale)} wins; high-stale rows "
-            f"produced {high_stale_losses}/{len(high_stale)} losses."
+            "Contention-aware rows with low hot-set-sized stale telemetry "
+            f"produced {low_stale_wins}/{len(low_stale)} wins; high-stale "
+            f"rows produced {high_stale_losses}/{len(high_stale)} losses."
         )
 
         similar_hit_lower_wait = [
@@ -2880,7 +3444,8 @@ def write_report(path: Path,
                  policy_summary: list[dict[str, Any]],
                  comparison_rows: list[dict[str, Any]],
                  report_mode: str,
-                 dimensions: dict[str, dict[str, Any]]) -> None:
+                 dimensions: dict[str, dict[str, Any]],
+                 best_run_summary: list[dict[str, Any]]) -> None:
     """Write the Phase F Markdown report."""
 
     rel_plots_by_group: dict[str, list[Path]] = defaultdict(list)
@@ -2964,11 +3529,42 @@ def write_report(path: Path,
                     ("Avg Mean Delta", "avg_mean_latency_delta_pct"),
                     ("Avg P99 Delta", "avg_p99_latency_delta_pct"),
                     ("Avg Hit Rate", "avg_local_hit_rate"),
-                    ("Avg Stale Telemetry", "avg_stale_telemetry_rate"),
+                    ("Avg Hot-Set Stale", "avg_stale_telemetry_rate"),
                     ("Avg Fairness", "avg_jain_inverse_latency_fairness"),
                 ],
             ),
             "",
+        ]
+    )
+    if report_mode == "policy_viability":
+        lines.extend(
+            [
+                "## Best Run Examples",
+                "",
+                "These rows show each non-baseline policy's best individual "
+                f"mean-latency improvement versus `{baseline}`. They are "
+                "high-water examples from the matrix, not global averages.",
+                "",
+                markdown_table(
+                    best_run_summary,
+                    [
+                        ("Target Policy", "target_policy"),
+                        ("Improvement", "latency_improvement_pct"),
+                        ("Churn", "hot_set_churn_fraction"),
+                        ("Cache X", "cache_capacity_hotset_multiplier"),
+                        ("RPE", "requests_per_node_per_epoch"),
+                        ("Hot Set", "hot_set_size"),
+                        ("Object Mode", "object_size_mode"),
+                        ("Large Obj P", "large_object_probability"),
+                        ("Channels", "memory_channel_count"),
+                        ("Hot Channels", "hot_object_channel_count"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "## Plots",
             "",
         ]
@@ -3007,8 +3603,14 @@ def write_report(path: Path,
                 "For policy-viability runs, global-average plots summarize all "
                 "regimes together. Churn-conditioned plots should be used to "
                 "separate stable, predictive telemetry from high-churn regimes "
-                "where stale telemetry is expected to hurt contention-aware "
-                "policies.",
+                "where hot-set-sized stale telemetry is expected to hurt "
+                "contention-aware policies.",
+                "",
+                "Best-run example plots intentionally zoom in on each "
+                "non-baseline policy's strongest individual condition. They "
+                "are useful for explaining high points in the scatter plot, "
+                "but should be paired with global and churn-conditioned views "
+                "before making broad policy claims.",
                 "",
             ]
         )
@@ -3042,6 +3644,14 @@ def write_report(path: Path,
             "- `policy_comparison.csv`",
             "- `policy_summary.csv`",
             "- `condition_summary.csv`",
+            *(
+                [
+                    "- `viability_best_runs.csv`",
+                    "- `viability_best_run_policy_context.csv`",
+                ]
+                if report_mode == "policy_viability"
+                else []
+            ),
             "- `plots/`",
             "",
         ]
@@ -3079,6 +3689,12 @@ def main() -> int:
     )
     policy_summary = build_policy_summary(comparison_rows)
     condition_summary = build_condition_summary(comparison_rows)
+    best_run_summary: list[dict[str, Any]] = []
+    best_run_context: list[dict[str, Any]] = []
+    if report_mode == "policy_viability":
+        best_run_summary, best_run_context = build_best_run_examples(
+            comparison_rows,
+        )
 
     write_csv(output_dir / "policy_comparison.csv",
               COMPARISON_COLUMNS,
@@ -3089,6 +3705,13 @@ def main() -> int:
     write_csv(output_dir / "condition_summary.csv",
               CONDITION_COLUMNS,
               condition_summary)
+    if report_mode == "policy_viability":
+        write_csv(output_dir / "viability_best_runs.csv",
+                  BEST_RUN_COLUMNS,
+                  best_run_summary)
+        write_csv(output_dir / "viability_best_run_policy_context.csv",
+                  BEST_RUN_CONTEXT_COLUMNS,
+                  best_run_context)
     plot_paths = generate_plots(
         plt,
         output_dir,
@@ -3097,6 +3720,7 @@ def main() -> int:
         policy_summary,
         report_mode,
         dimensions,
+        best_run_context,
     )
     write_report(
         output_dir / "report.md",
@@ -3109,6 +3733,7 @@ def main() -> int:
         comparison_rows,
         report_mode,
         dimensions,
+        best_run_summary,
     )
     print(f"Wrote analysis report: {output_dir / 'report.md'}", flush=True)
     return 0

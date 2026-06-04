@@ -182,6 +182,22 @@ add_test(
 )
 
 add_test(
+    NAME experiment_matrix_contention_size_value_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        quick
+        --policies
+        contention_aware_size_value
+        --dry-run
+        --expect-runs
+        1
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_contention_size_value_dry_run
+)
+
+add_test(
     NAME experiment_matrix_phase_c_dry_run
     COMMAND
         ${Python3_EXECUTABLE}
@@ -240,6 +256,20 @@ add_test(
 )
 
 add_test(
+    NAME experiment_matrix_eval_bursty_calibration_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_bursty_calibration
+        --dry-run
+        --expect-runs
+        4
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_bursty_calibration_dry_run
+)
+
+add_test(
     NAME experiment_matrix_eval_policy_viability_dry_run
     COMMAND
         ${Python3_EXECUTABLE}
@@ -248,7 +278,7 @@ add_test(
         eval_policy_viability
         --dry-run
         --expect-runs
-        175
+        630
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_eval_policy_viability_dry_run
 )

@@ -33,6 +33,7 @@ using dm_sim::CrossNodeOverlap;
 using dm_sim::HotSetMode;
 using dm_sim::HotnessHistoryMode;
 using dm_sim::SyntheticWorkloadConfig;
+using dm_sim::WorkloadIssueMode;
 
 HotnessPolicyConfig hotness_config(
     std::uint64_t min_admit_count = 2,
@@ -721,6 +722,194 @@ void test_multi_channel_different_channel_requests_run_concurrently() {
     assert(channel_one->total_queue_wait == 0);
 }
 
+void test_completion_driven_synthetic_workload_remains_response_paced() {
+    SimulationConfig config;
+    SyntheticWorkloadConfig workload;
+    workload.seed = 44;
+    workload.compute_node_ids = {1};
+    workload.object_count = 8;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 2;
+    workload.epoch_count = 1;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::Static;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    workload.issue_mode = WorkloadIssueMode::CompletionDriven;
+    config.synthetic_workload = workload;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 0;
+    config.memory_base_latency = 10;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    std::size_t local_lookups_at_zero = 0;
+    for (const EventRecord& event : simulator.event_log()) {
+        if (event.type == EventType::LocalCacheLookup && event.time == 0) {
+            ++local_lookups_at_zero;
+        }
+    }
+
+    assert(local_lookups_at_zero == 1);
+    assert(simulator.stats().completed_requests() == 2);
+}
+
+void test_scheduled_bursty_workload_can_overlap_same_node_requests() {
+    SimulationConfig config;
+    SyntheticWorkloadConfig workload;
+    workload.seed = 45;
+    workload.compute_node_ids = {1};
+    workload.object_count = 8;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 2;
+    workload.epoch_count = 1;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::Static;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    workload.issue_mode = WorkloadIssueMode::ScheduledBursty;
+    workload.burst_size = 2;
+    workload.burst_interval = 10;
+    workload.intra_burst_gap = 0;
+    config.synthetic_workload = workload;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 0;
+    config.memory_base_latency = 10;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    std::size_t local_lookups_at_zero = 0;
+    std::optional<SimTime> first_completion_time;
+    for (const EventRecord& event : simulator.event_log()) {
+        if (event.type == EventType::LocalCacheLookup && event.time == 0) {
+            ++local_lookups_at_zero;
+        }
+        if (event.type == EventType::RequestComplete &&
+            !first_completion_time.has_value()) {
+            first_completion_time = event.time;
+        }
+    }
+
+    assert(local_lookups_at_zero == 2);
+    assert(first_completion_time.has_value());
+    assert(*first_completion_time > 0);
+    assert(simulator.stats().completed_requests() == 2);
+}
+
+void test_scheduled_bursty_increases_queue_pressure() {
+    auto make_config = [](WorkloadIssueMode issue_mode) {
+        SimulationConfig config;
+        SyntheticWorkloadConfig workload;
+        workload.seed = 46;
+        workload.compute_node_ids = {1, 2};
+        workload.object_count = 8;
+        workload.object_size_bytes = 8;
+        workload.requests_per_node_per_epoch = 4;
+        workload.epoch_count = 1;
+        workload.hot_set_size = 1;
+        workload.hot_access_probability = 1.0;
+        workload.hot_set_mode = HotSetMode::Static;
+        workload.cross_node_overlap = CrossNodeOverlap::High;
+        workload.issue_mode = issue_mode;
+        workload.burst_size = 4;
+        workload.burst_interval = 20;
+        workload.intra_burst_gap = 0;
+        config.synthetic_workload = workload;
+        config.memory_node_id = 99;
+        config.one_way_link_latency = 0;
+        config.memory_base_latency = 10;
+        config.memory_bandwidth_bytes_per_time = 8;
+        config.local_cache = LocalCacheConfig{
+            0,
+            1,
+            LocalCachePolicyType::AlwaysRemote,
+        };
+        return config;
+    };
+
+    Simulator completion_driven(
+        make_config(WorkloadIssueMode::CompletionDriven));
+    completion_driven.run();
+
+    Simulator scheduled_bursty(
+        make_config(WorkloadIssueMode::ScheduledBursty));
+    scheduled_bursty.run();
+
+    assert(scheduled_bursty.stats().total_memory_wait() >
+           completion_driven.stats().total_memory_wait());
+    assert(scheduled_bursty.stats().peak_memory_queue_depth() >
+           completion_driven.stats().peak_memory_queue_depth());
+}
+
+void test_scheduled_bursty_epoch_barrier_waits_for_prior_epoch_completion() {
+    SimulationConfig config;
+    SyntheticWorkloadConfig workload;
+    workload.seed = 47;
+    workload.compute_node_ids = {1, 2};
+    workload.object_count = 16;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 2;
+    workload.epoch_count = 2;
+    workload.hot_set_size = 1;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = HotSetMode::EpochShift;
+    workload.cross_node_overlap = CrossNodeOverlap::High;
+    workload.issue_mode = WorkloadIssueMode::ScheduledBursty;
+    workload.burst_size = 2;
+    workload.burst_interval = 20;
+    workload.intra_burst_gap = 0;
+    config.synthetic_workload = workload;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 0;
+    config.memory_base_latency = 10;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = LocalCacheConfig{
+        0,
+        1,
+        LocalCachePolicyType::AlwaysRemote,
+    };
+
+    Simulator simulator(config);
+    simulator.run();
+
+    SimTime latest_epoch_zero_complete = 0;
+    std::optional<SimTime> first_epoch_one_lookup;
+    for (const EventRecord& event : simulator.event_log()) {
+        if (event.request_id == dm_sim::kInvalidRequestId) {
+            continue;
+        }
+
+        const Request& request = simulator.requests().at(event.request_id);
+        if (request.epoch_id == 0 && event.type == EventType::RequestComplete) {
+            latest_epoch_zero_complete =
+                std::max(latest_epoch_zero_complete, event.time);
+        }
+        if (request.epoch_id == 1 && event.type == EventType::LocalCacheLookup) {
+            if (!first_epoch_one_lookup.has_value() ||
+                event.time < *first_epoch_one_lookup) {
+                first_epoch_one_lookup = event.time;
+            }
+        }
+    }
+
+    assert(first_epoch_one_lookup.has_value());
+    assert(*first_epoch_one_lookup >= latest_epoch_zero_complete);
+}
+
 void test_contention_separates_epoch_shifted_requests() {
     SimulationConfig config;
     config.compute_nodes = {
@@ -936,6 +1125,10 @@ int main() {
     test_contention_tracks_service_time_by_object_size();
     test_multi_channel_same_channel_requests_queue();
     test_multi_channel_different_channel_requests_run_concurrently();
+    test_completion_driven_synthetic_workload_remains_response_paced();
+    test_scheduled_bursty_workload_can_overlap_same_node_requests();
+    test_scheduled_bursty_increases_queue_pressure();
+    test_scheduled_bursty_epoch_barrier_waits_for_prior_epoch_completion();
     test_contention_separates_epoch_shifted_requests();
     test_global_epoch_barrier_waits_for_prior_epoch_completion();
     test_contention_aware_uses_previous_epoch_and_hits_after_admission();

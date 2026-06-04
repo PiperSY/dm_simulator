@@ -37,7 +37,7 @@ struct EpochDiagnosticSummary {
 // latency. Most fields are derived after the simulation from cache lifecycle,
 // request, response, and contention telemetry.
 struct ViabilityMetricsSummary {
-    std::size_t top_k = 5;
+    std::size_t telemetry_comparison_object_count = 5;
     std::size_t admission_attempts = 0;
     std::size_t successful_placements = 0;
     std::size_t rejected_admissions = 0;

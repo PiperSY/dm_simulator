@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <unordered_set>
@@ -372,6 +373,42 @@ std::vector<std::uint64_t> object_sizes_by_id(
     return sizes;
 }
 
+SimTime node_epoch_jitter(const SyntheticWorkloadConfig& config,
+                          NodeId node_id,
+                          EpochId epoch_id) {
+    if (config.node_phase_jitter == 0) {
+        return 0;
+    }
+
+    // Jitter uses its own deterministic RNG stream so enabling burst timing
+    // does not perturb object selection or object-size assignment.
+    const std::uint64_t seed =
+        config.seed ^ (static_cast<std::uint64_t>(node_id) << 32) ^
+        (static_cast<std::uint64_t>(epoch_id) * 0x9e3779b97f4a7c15ULL);
+    std::mt19937_64 jitter_rng(seed);
+    std::uniform_int_distribution<SimTime> distribution(
+        0,
+        config.node_phase_jitter);
+    return distribution(jitter_rng);
+}
+
+SimTime scheduled_issue_offset(const SyntheticWorkloadConfig& config,
+                               NodeId node_id,
+                               EpochId epoch_id,
+                               std::size_t request_index_in_epoch) {
+    if (config.issue_mode == WorkloadIssueMode::CompletionDriven) {
+        return 0;
+    }
+
+    const std::size_t burst_index =
+        request_index_in_epoch / config.burst_size;
+    const std::size_t position_in_burst =
+        request_index_in_epoch % config.burst_size;
+    return node_epoch_jitter(config, node_id, epoch_id) +
+           static_cast<SimTime>(burst_index) * config.burst_interval +
+           static_cast<SimTime>(position_in_burst) * config.intra_burst_gap;
+}
+
 // Rejects configurations that would produce invalid distributions or impossible
 // hot-set layouts.
 void validate_synthetic_workload_config(const SyntheticWorkloadConfig& config) {
@@ -457,6 +494,34 @@ void validate_synthetic_workload_config(const SyntheticWorkloadConfig& config) {
         std::isnan(config.large_object_probability)) {
         throw std::invalid_argument(
             "Synthetic workload large_object_probability must be in [0, 1]");
+    }
+
+    if (config.burst_size == 0) {
+        throw std::invalid_argument(
+            "Synthetic workload burst_size must be positive");
+    }
+
+    if (config.burst_interval == 0) {
+        throw std::invalid_argument(
+            "Synthetic workload burst_interval must be positive");
+    }
+
+    if (config.issue_mode == WorkloadIssueMode::ScheduledBursty &&
+        config.burst_size > 1) {
+        const std::size_t gap_count = config.burst_size - 1;
+        if (config.intra_burst_gap >
+            std::numeric_limits<SimTime>::max() /
+                static_cast<SimTime>(gap_count)) {
+            throw std::invalid_argument(
+                "Synthetic workload burst timing overflows SimTime");
+        }
+        const SimTime burst_span =
+            static_cast<SimTime>(gap_count) * config.intra_burst_gap;
+        if (config.burst_interval < burst_span) {
+            throw std::invalid_argument(
+                "Synthetic workload burst_interval must cover the in-burst "
+                "request spacing");
+        }
     }
 
     const std::size_t eligible_count = eligible_hot_object_count(config);
@@ -571,6 +636,11 @@ GeneratedWorkload generate_synthetic_workload(
                     object_id,
                     object_sizes[static_cast<std::size_t>(object_id)],
                     epoch_id,
+                    scheduled_issue_offset(
+                        config,
+                        node_workload.node_id,
+                        epoch_id,
+                        i),
                 });
             }
         }

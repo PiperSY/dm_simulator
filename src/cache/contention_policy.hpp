@@ -62,11 +62,13 @@ private:
         double distinct_requesters = 0.0;
         double total_queue_wait = 0.0;
         double total_remote_service_time = 0.0;
+        double cost_density = 0.0;
     };
     // Struct to hold the raw components of the contention score for an object, which are calculated based on the observed contention metrics and the configured weights.
     struct ScoringContentionStats {
         double remote_accesses = 0.0;
         double distinct_requesters = 0.0;
+        double bytes_served = 0.0;
         double total_queue_wait = 0.0;
         double total_remote_service_time = 0.0;
     };
@@ -76,6 +78,9 @@ private:
     [[nodiscard]] double normalized(double value, double max_value) const;
     // Count of local accesses for the specified object ID, which is used to determine the local hotness component of the contention score. 
     [[nodiscard]] std::uint64_t count_for(ObjectId object_id) const;
+    // Estimates prior remote pain per byte of cache space from completed epoch summaries.
+    [[nodiscard]] double cost_per_cache_byte(
+        const ScoringContentionStats& stats) const;
     // Adds a snapshot of contention statistics for a given object to the internal state. Used to track contention metrics across epochs and inform future scoring and decision-making.
     void add_contention_snapshot(const ObjectContentionStats& object_stats,
                                  double weight) const;

@@ -197,6 +197,12 @@ ContentionScoreComponents ContentionAwarePolicy::score_object(
         score.remote_service_time = normalized(
             previous.total_remote_service_time,
             maxima_.total_remote_service_time);
+        // Cost density asks whether an object avoided high remote pain per byte
+        // of cache footprint. It reuses completed epoch summaries instead of
+        // trying to causally attribute queueing to individual requests.
+        score.cost_per_cache_byte = cost_per_cache_byte(previous);
+        score.cost_density =
+            normalized(score.cost_per_cache_byte, maxima_.cost_density);
     }
 
     // Penalize objects by the fraction of local cache they would consume. A
@@ -218,7 +224,8 @@ ContentionScoreComponents ContentionAwarePolicy::score_object(
         weights.remote_access_weight * score.remote_accesses +
         weights.distinct_requester_weight * score.distinct_requesters +
         weights.queue_wait_weight * score.queue_wait +
-        weights.remote_service_time_weight * score.remote_service_time -
+        weights.remote_service_time_weight * score.remote_service_time +
+        weights.cost_density_weight * score.cost_density -
         weights.size_penalty_weight * score.size_penalty;
 
     return score;
@@ -248,6 +255,23 @@ std::uint64_t ContentionAwarePolicy::count_for(ObjectId object_id) const {
     return it->second;
 }
 
+double ContentionAwarePolicy::cost_per_cache_byte(
+    const ScoringContentionStats& stats) const {
+    if (stats.remote_accesses <= 0.0 || stats.bytes_served <= 0.0) {
+        return 0.0;
+    }
+
+    const double estimated_size_bytes = stats.bytes_served /
+                                        stats.remote_accesses;
+    if (estimated_size_bytes <= 0.0) {
+        return 0.0;
+    }
+
+    const double remote_cost = stats.total_queue_wait +
+                               stats.total_remote_service_time;
+    return remote_cost / estimated_size_bytes;
+}
+
 void ContentionAwarePolicy::add_contention_snapshot(
     const ObjectContentionStats& object_stats,
     double weight) const {
@@ -257,6 +281,8 @@ void ContentionAwarePolicy::add_contention_snapshot(
         static_cast<double>(object_stats.remote_accesses) * weight;
     aggregate.distinct_requesters +=
         static_cast<double>(object_stats.distinct_requesters) * weight;
+    aggregate.bytes_served +=
+        static_cast<double>(object_stats.bytes_served) * weight;
     aggregate.total_queue_wait +=
         static_cast<double>(object_stats.total_queue_wait) * weight;
     aggregate.total_remote_service_time +=
@@ -275,6 +301,8 @@ void ContentionAwarePolicy::refresh_normalization_maxima() const {
         maxima_.total_remote_service_time =
             std::max(maxima_.total_remote_service_time,
                      stats.total_remote_service_time);
+        maxima_.cost_density =
+            std::max(maxima_.cost_density, cost_per_cache_byte(stats));
     }
 }
 

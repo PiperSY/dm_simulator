@@ -156,6 +156,10 @@ Simulator::Simulator(SimulationConfig config)
                 LocalCachePolicyType::GlobalHottestReplication
             ? &global_replica_plan_
             : nullptr;
+    const WorkloadIssueMode issue_mode =
+        config_.synthetic_workload.has_value()
+            ? config_.synthetic_workload->issue_mode
+            : WorkloadIssueMode::CompletionDriven;
 
     for (const ComputeNodeConfig& node_config : config_.compute_nodes) {
         compute_nodes_.emplace(
@@ -163,6 +167,7 @@ Simulator::Simulator(SimulationConfig config)
             std::make_unique<ComputeNode>(node_config.node_id,
                                           config_.memory_node_id,
                                           WorkloadCursor(node_config.requests),
+                                          issue_mode,
                                           config_.one_way_link_latency,
                                           config_.local_cache.hit_latency,
                                           LocalCache(
@@ -336,9 +341,13 @@ void Simulator::release_next_epoch_if_ready(Scheduler& scheduler) {
         const std::optional<EpochId> node_next_epoch =
             compute_it->second->next_request_epoch();
         if (node_next_epoch.has_value() && *node_next_epoch == *next_epoch) {
-            scheduler.schedule(Event(scheduler.now(),
-                                     EventType::GenerateRequest,
-                                     node_config.node_id));
+            // Completion-driven workloads have zero offsets. Bursty workloads
+            // use the first offset here, then ComputeNode owns the rest of the
+            // per-node arrival schedule for the released epoch.
+            scheduler.schedule(Event(
+                scheduler.now() + compute_it->second->next_request_issue_offset(),
+                EventType::GenerateRequest,
+                node_config.node_id));
         }
     }
 }

@@ -23,6 +23,9 @@ struct RequestSpec {
     ObjectId object_id = 0;
     std::uint64_t size_bytes = 0;
     EpochId epoch_id = 0;
+    // In scheduled-bursty synthetic workloads this is the planned arrival time
+    // relative to the epoch release. Completion-driven workloads leave it zero.
+    SimTime scheduled_issue_offset = 0;
 };
 
 /*********************************** 

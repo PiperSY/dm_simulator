@@ -200,6 +200,11 @@ ContentionPolicyConfig parse_contention_policy_config(
         "size_penalty_weight",
         "local_cache.contention",
         config.weights.size_penalty_weight);
+    config.weights.cost_density_weight = optional_nonnegative_double(
+        contention_node,
+        "cost_density_weight",
+        "local_cache.contention",
+        config.weights.cost_density_weight);
     config.min_admit_score = optional_nonnegative_double(
         contention_node,
         "min_admit_score",
@@ -293,6 +298,19 @@ ObjectSizeMode parse_object_size_mode(const std::string& value) {
 
     throw std::invalid_argument(
         "Invalid workload.object_size_mode: expected fixed or bimodal");
+}
+
+WorkloadIssueMode parse_workload_issue_mode(const std::string& value) {
+    if (value == "completion_driven") {
+        return WorkloadIssueMode::CompletionDriven;
+    }
+    if (value == "scheduled_bursty") {
+        return WorkloadIssueMode::ScheduledBursty;
+    }
+
+    throw std::invalid_argument(
+        "Invalid workload.issue_mode: expected completion_driven or "
+        "scheduled_bursty");
 }
 
 double optional_probability(const YAML::Node& node,
@@ -453,6 +471,28 @@ ExperimentConfig load_experiment_config(const std::string& path) {
         "large_object_probability",
         "workload",
         workload.large_object_probability);
+    if (const YAML::Node issue_mode_node = workload_node["issue_mode"]) {
+        workload.issue_mode =
+            parse_workload_issue_mode(issue_mode_node.as<std::string>());
+    }
+    workload.burst_size = optional_positive_u64(workload_node,
+                                                "burst_size",
+                                                "workload",
+                                                workload.burst_size);
+    workload.burst_interval = optional_positive_u64(workload_node,
+                                                    "burst_interval",
+                                                    "workload",
+                                                    workload.burst_interval);
+    if (const YAML::Node intra_burst_gap_node =
+            workload_node["intra_burst_gap"]) {
+        workload.intra_burst_gap =
+            intra_burst_gap_node.as<SimTime>();
+    }
+    if (const YAML::Node node_phase_jitter_node =
+            workload_node["node_phase_jitter"]) {
+        workload.node_phase_jitter =
+            node_phase_jitter_node.as<SimTime>();
+    }
     workload.requests_per_node_per_epoch = required_as<std::size_t>(
         workload_node, "requests_per_node_per_epoch", "workload");
     workload.epoch_count =

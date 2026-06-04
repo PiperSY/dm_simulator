@@ -1,4 +1,5 @@
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -217,6 +218,7 @@ void test_viability_metrics_track_reuse_relief_and_overlap() {
         dm_sim::summarize_metrics("viability_reuse", simulator);
     const dm_sim::ViabilityMetricsSummary& viability = summary.viability;
 
+    assert(viability.telemetry_comparison_object_count == 5);
     assert(viability.successful_placements == 1);
     assert(viability.rejected_admissions == 0);
     assert(viability.total_future_hits == 3);
@@ -227,6 +229,79 @@ void test_viability_metrics_track_reuse_relief_and_overlap() {
     assert(viability.estimated_avoided_remote_accesses == 3);
     assert(viability.estimated_avoided_remote_service_time > 0.0);
     assert(near(viability.jain_inverse_latency_fairness, 1.0));
+}
+
+void test_synthetic_viability_uses_hot_set_sized_staleness_window() {
+    dm_sim::SimulationConfig config;
+    config.memory_node_id = 99;
+    config.one_way_link_latency = 2;
+    config.memory_base_latency = 5;
+    config.memory_bandwidth_bytes_per_time = 8;
+    config.local_cache = dm_sim::LocalCacheConfig{
+        0,
+        1,
+        dm_sim::LocalCachePolicyType::AlwaysRemote,
+    };
+
+    dm_sim::SyntheticWorkloadConfig workload;
+    workload.seed = 7;
+    workload.compute_node_ids = {1};
+    workload.object_count = 16;
+    workload.object_size_bytes = 8;
+    workload.requests_per_node_per_epoch = 96;
+    workload.epoch_count = 2;
+    workload.hot_set_size = 8;
+    workload.hot_access_probability = 1.0;
+    workload.hot_set_mode = dm_sim::HotSetMode::EpochShift;
+    workload.hot_set_churn_fraction = 0.5;
+    workload.cross_node_overlap = dm_sim::CrossNodeOverlap::High;
+    config.synthetic_workload = workload;
+
+    dm_sim::Simulator simulator(config);
+    simulator.run();
+
+    const dm_sim::MetricsSummary summary =
+        dm_sim::summarize_metrics("hotset_sized_stale_metric", simulator);
+    const dm_sim::ViabilityMetricsSummary& viability = summary.viability;
+
+    assert(viability.telemetry_comparison_object_count == 8);
+    assert(!viability.epoch_diagnostics.empty());
+
+    const dm_sim::EpochDiagnosticSummary& epoch =
+        viability.epoch_diagnostics.front();
+    assert(epoch.previous_top_count <= 8);
+    assert(epoch.current_top_count <= 8);
+    assert(epoch.previous_top_count > 5);
+    assert(epoch.current_top_count > 5);
+
+    const std::size_t top_five_overlap = [&epoch]() {
+        std::size_t count = 0;
+        const std::size_t previous_limit =
+            std::min<std::size_t>(5, epoch.previous_top_contended.size());
+        const std::size_t current_limit =
+            std::min<std::size_t>(5, epoch.current_top_requested.size());
+        for (std::size_t previous_index = 0;
+             previous_index < previous_limit;
+             ++previous_index) {
+            for (std::size_t current_index = 0;
+                 current_index < current_limit;
+                 ++current_index) {
+                if (epoch.previous_top_contended[previous_index] ==
+                    epoch.current_top_requested[current_index]) {
+                    ++count;
+                    break;
+                }
+            }
+        }
+        return count;
+    }();
+
+    // This regression captures why the metric moved away from a fixed top-5:
+    // the exact leading objects can churn while the wider hot-set region still
+    // carries useful overlap for contention-aware placement diagnostics.
+    assert(epoch.overlap_count > top_five_overlap);
+    assert(viability.average_top_object_overlap > 0.0);
+    assert(viability.average_top_object_overlap < 1.0);
 }
 
 void test_viability_metrics_detect_eviction_regret() {
@@ -269,6 +344,7 @@ int main() {
     test_contention_aggregation_records_remote_signals();
     test_cache_hits_do_not_increment_remote_contention();
     test_viability_metrics_track_reuse_relief_and_overlap();
+    test_synthetic_viability_uses_hot_set_sized_staleness_window();
     test_viability_metrics_detect_eviction_regret();
     return 0;
 }

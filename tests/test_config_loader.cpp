@@ -17,6 +17,7 @@ using dm_sim::HotnessHistoryMode;
 using dm_sim::LocalCachePolicyType;
 using dm_sim::ObjectSizeMode;
 using dm_sim::SimulationConfig;
+using dm_sim::WorkloadIssueMode;
 
 std::filesystem::path write_temp_config(const std::string& name,
                                         const std::string& contents) {
@@ -88,6 +89,11 @@ void test_valid_yaml_loads_experiment_and_simulation_config() {
     assert(workload.object_size_bytes == 16);
     assert(workload.hot_set_churn_fraction == 1.0);
     assert(workload.object_size_mode == ObjectSizeMode::Fixed);
+    assert(workload.issue_mode == WorkloadIssueMode::CompletionDriven);
+    assert(workload.burst_size == 4);
+    assert(workload.burst_interval == 100);
+    assert(workload.intra_burst_gap == 1);
+    assert(workload.node_phase_jitter == 0);
     assert(workload.requests_per_node_per_epoch == 4);
     assert(workload.epoch_count == 2);
     assert(workload.hot_set_size == 4);
@@ -144,6 +150,30 @@ void test_phase_b_workload_fields_parse() {
     assert(workload.object_size_small_bytes == 8);
     assert(workload.object_size_large_bytes == 64);
     assert(workload.large_object_probability == 0.25);
+}
+
+void test_bursty_workload_fields_parse() {
+    std::string config = valid_config_text();
+    config.replace(config.find("object_size_bytes: 16"),
+                   std::string("object_size_bytes: 16").size(),
+                   "object_size_bytes: 16\n"
+                   "  issue_mode: scheduled_bursty\n"
+                   "  burst_size: 3\n"
+                   "  burst_interval: 20\n"
+                   "  intra_burst_gap: 2\n"
+                   "  node_phase_jitter: 5");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_bursty_config.yaml", config);
+    const ExperimentConfig experiment =
+        dm_sim::load_experiment_config(path.string());
+    const auto& workload = *experiment.simulation.synthetic_workload;
+
+    assert(workload.issue_mode == WorkloadIssueMode::ScheduledBursty);
+    assert(workload.burst_size == 3);
+    assert(workload.burst_interval == 20);
+    assert(workload.intra_burst_gap == 2);
+    assert(workload.node_phase_jitter == 5);
 }
 
 void test_enum_strings_parse() {
@@ -302,6 +332,7 @@ void test_phase8_contention_policy_config_parses() {
                    "    queue_wait_weight: 2.5\n"
                    "    remote_service_time_weight: 1.6\n"
                    "    size_penalty_weight: 0.7\n"
+                   "    cost_density_weight: 0.9\n"
                    "    min_admit_score: 1.8\n"
                    "    local_hotness_threshold: 3\n"
                    "    reset_on_epoch_change: false\n"
@@ -324,6 +355,7 @@ void test_phase8_contention_policy_config_parses() {
     assert(local_cache.contention.weights.queue_wait_weight == 2.5);
     assert(local_cache.contention.weights.remote_service_time_weight == 1.6);
     assert(local_cache.contention.weights.size_penalty_weight == 0.7);
+    assert(local_cache.contention.weights.cost_density_weight == 0.9);
     assert(local_cache.contention.min_admit_score == 1.8);
     assert(local_cache.contention.local_hotness_threshold == 3);
     assert(!local_cache.contention.reset_on_epoch_change);
@@ -350,6 +382,7 @@ void test_phase_e_contention_variant_defaults_to_v1() {
     assert(contention.telemetry_decay == 1.0);
     assert(contention.local_reuse_gate_threshold == 2);
     assert(contention.eviction_score_margin == 0.0);
+    assert(contention.weights.cost_density_weight == 0.0);
 }
 
 void test_invalid_contention_policy_config_fails() {
@@ -369,6 +402,26 @@ void test_invalid_contention_policy_config_fails() {
         const std::string message = error.what();
         assert(message.find("local_cache.contention.queue_wait_weight") !=
                std::string::npos);
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    cost_density_weight: -0.5");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_cost_density.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("local_cache.contention.cost_density_weight") !=
+                   std::string::npos);
+        }
     }
 }
 
@@ -577,6 +630,44 @@ void test_invalid_channel_fields_fail() {
     }
 }
 
+void test_invalid_bursty_workload_fields_fail() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  issue_mode: teleporting_burst");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_issue_mode.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.issue_mode") != std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("object_size_bytes: 16"),
+                       std::string("object_size_bytes: 16").size(),
+                       "object_size_bytes: 16\n"
+                       "  burst_size: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_burst_size.yaml", config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find("workload.burst_size") != std::string::npos);
+        }
+    }
+}
+
 void test_missing_required_field_fails() {
     const std::filesystem::path path =
         write_temp_config("dm_sim_missing_config.yaml", R"(experiment:
@@ -616,6 +707,7 @@ int main() {
     test_valid_yaml_loads_experiment_and_simulation_config();
     test_memory_channels_and_hotspot_fields_parse();
     test_phase_b_workload_fields_parse();
+    test_bursty_workload_fields_parse();
     test_enum_strings_parse();
     test_phase6_policy_strings_parse();
     test_hotness_history_mode_defaults_and_validation();
@@ -625,6 +717,7 @@ int main() {
     test_invalid_phase_e_contention_variant_fields_fail();
     test_invalid_phase_b_workload_fields_fail();
     test_invalid_channel_fields_fail();
+    test_invalid_bursty_workload_fields_fail();
     test_missing_required_field_fails();
     test_invalid_enum_value_fails();
     return 0;

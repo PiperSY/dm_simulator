@@ -10,6 +10,7 @@ namespace dm_sim {
 ComputeNode::ComputeNode(NodeId node_id,
                          NodeId memory_node_id,
                          WorkloadCursor workload,
+                         WorkloadIssueMode issue_mode,
                          SimTime one_way_link_latency,
                          SimTime local_cache_hit_latency,
                          LocalCache local_cache,
@@ -21,6 +22,7 @@ ComputeNode::ComputeNode(NodeId node_id,
     : node_id_(node_id),
       memory_node_id_(memory_node_id),
       workload_(std::move(workload)),
+      issue_mode_(issue_mode),
       one_way_link_latency_(one_way_link_latency),
       local_cache_hit_latency_(local_cache_hit_latency),
       local_cache_(std::move(local_cache)),
@@ -72,6 +74,14 @@ std::optional<EpochId> ComputeNode::next_request_epoch() const {
     return workload_.peek_next().epoch_id;
 }
 
+SimTime ComputeNode::next_request_issue_offset() const {
+    if (!workload_.has_next()) {
+        return 0;
+    }
+
+    return workload_.peek_next().scheduled_issue_offset;
+}
+
 std::vector<PolicyDecisionRecord> ComputeNode::policy_diagnostics() const {
     return local_cache_.policy_diagnostics();
 }
@@ -102,6 +112,15 @@ void ComputeNode::handle_generate_request(const Event& event,
     request.epoch_id = spec.epoch_id;
     request.current_stage = RequestStage::Generated;
 
+    if (issue_mode_ == WorkloadIssueMode::ScheduledBursty) {
+        // Scheduled offsets are relative to the epoch release time. Recovering
+        // that base here keeps the simulator from becoming a burst controller.
+        current_epoch_start_time_ =
+            event.time >= spec.scheduled_issue_offset
+                ? event.time - spec.scheduled_issue_offset
+                : 0;
+    }
+
     start_epoch_if_needed(request.epoch_id, event.time);
 
     request_table_[request_id] = request;
@@ -109,6 +128,8 @@ void ComputeNode::handle_generate_request(const Event& event,
 
     scheduler.schedule(
         Event(event.time, EventType::LocalCacheLookup, node_id_, request_id));
+
+    schedule_next_bursty_request_if_ready(scheduler);
 }
 
 void ComputeNode::handle_local_cache_lookup(const Event& event,
@@ -193,6 +214,10 @@ void ComputeNode::handle_request_complete(const Event& event,
                                           Scheduler& scheduler) {
     (void)event;
 
+    if (issue_mode_ == WorkloadIssueMode::ScheduledBursty) {
+        return;
+    }
+
     if (workload_.has_next() && current_epoch_.has_value() &&
         workload_.peek_next().epoch_id == *current_epoch_) {
         scheduler.schedule(
@@ -219,6 +244,25 @@ void ComputeNode::start_epoch_if_needed(EpochId epoch_id, SimTime event_time) {
     }
 
     local_cache_.install_replicas(it->second, event_time, node_id_, epoch_id);
+}
+
+void ComputeNode::schedule_next_bursty_request_if_ready(Scheduler& scheduler) {
+    if (issue_mode_ != WorkloadIssueMode::ScheduledBursty ||
+        !current_epoch_.has_value() ||
+        !workload_.has_next() ||
+        workload_.peek_next().epoch_id != *current_epoch_) {
+        return;
+    }
+
+    const SimTime next_issue_time =
+        current_epoch_start_time_ +
+        workload_.peek_next().scheduled_issue_offset;
+    // Bursty arrivals are intentionally independent from completion. This lets
+    // one compute node have overlapping outstanding requests without dumping an
+    // entire epoch of requests into the scheduler from Simulator.
+    scheduler.schedule(Event(next_issue_time,
+                             EventType::GenerateRequest,
+                             node_id_));
 }
 
 }  // namespace dm_sim

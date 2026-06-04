@@ -18,6 +18,8 @@ struct ContentionScoreComponents {
     double distinct_requesters = 0.0;
     double queue_wait = 0.0;
     double remote_service_time = 0.0;
+    double cost_density = 0.0;
+    double cost_per_cache_byte = 0.0;
     double size_penalty = 0.0;
     double total_score = 0.0;
 };

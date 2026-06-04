@@ -95,6 +95,9 @@ void test_runner_writes_expected_outputs() {
     assert(summary_json.find("\"policy\"") != std::string::npos);
     assert(summary_json.find("\"top_decisions_by_score\"") != std::string::npos);
     assert(summary_json.find("\"viability\"") != std::string::npos);
+    assert(summary_json.find("\"telemetry_comparison_object_count\"") !=
+           std::string::npos);
+    assert(summary_json.find("\"top_k\"") == std::string::npos);
     assert(summary_json.find("\"admission_yield\"") != std::string::npos);
     assert(summary_json.find("\"per_node\"") != std::string::npos);
 
@@ -103,9 +106,18 @@ void test_runner_writes_expected_outputs() {
     assert(line_count(output_dir / "contention_by_object.csv") == 2);
     assert(line_count(output_dir / "contention_by_channel.csv") == 2);
     assert(line_count(output_dir / "policy_diagnostics.csv") == 1);
+    const std::string policy_diagnostics =
+        read_file(output_dir / "policy_diagnostics.csv");
+    assert(policy_diagnostics.find("cost_density") != std::string::npos);
+    assert(policy_diagnostics.find("cost_per_cache_byte") != std::string::npos);
     assert(line_count(output_dir / "cache_admissions.csv") == 3);
     assert(line_count(output_dir / "epoch_diagnostics.csv") == 1);
     assert(line_count(output_dir / "viability_metrics.csv") == 2);
+    const std::string viability_metrics =
+        read_file(output_dir / "viability_metrics.csv");
+    assert(viability_metrics.find("telemetry_comparison_object_count") !=
+           std::string::npos);
+    assert(viability_metrics.find("top_k") == std::string::npos);
 }
 
 }  // namespace

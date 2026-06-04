@@ -1,6 +1,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,6 +23,7 @@ using dm_sim::ObjectId;
 using dm_sim::ObjectSizeMode;
 using dm_sim::RequestSpec;
 using dm_sim::SyntheticWorkloadConfig;
+using dm_sim::WorkloadIssueMode;
 using dm_sim::WorkloadCursor;
 using dm_sim::memory_channel_for_object;
 
@@ -47,7 +51,9 @@ bool same_requests(const std::vector<RequestSpec>& lhs,
     for (std::size_t i = 0; i < lhs.size(); ++i) {
         if (lhs[i].object_id != rhs[i].object_id ||
             lhs[i].size_bytes != rhs[i].size_bytes ||
-            lhs[i].epoch_id != rhs[i].epoch_id) {
+            lhs[i].epoch_id != rhs[i].epoch_id ||
+            lhs[i].scheduled_issue_offset !=
+                rhs[i].scheduled_issue_offset) {
             return false;
         }
     }
@@ -300,7 +306,95 @@ void test_generated_request_counts_and_epochs() {
             assert(node_workload.requests[i].epoch_id == expected_epoch);
             assert(node_workload.requests[i].size_bytes ==
                    config.object_size_bytes);
+            assert(node_workload.requests[i].scheduled_issue_offset == 0);
         }
+    }
+}
+
+void test_scheduled_bursty_offsets_are_deterministic_and_ordered() {
+    SyntheticWorkloadConfig config = make_config();
+    config.issue_mode = WorkloadIssueMode::ScheduledBursty;
+    config.requests_per_node_per_epoch = 6;
+    config.epoch_count = 2;
+    config.burst_size = 3;
+    config.burst_interval = 20;
+    config.intra_burst_gap = 2;
+    config.node_phase_jitter = 0;
+
+    const GeneratedWorkload first = generate_synthetic_workload(config);
+    const GeneratedWorkload second = generate_synthetic_workload(config);
+    assert(same_generated_workload(first, second));
+
+    for (const NodeWorkload& node_workload : first.node_workloads) {
+        for (std::size_t i = 0; i < node_workload.requests.size(); ++i) {
+            const RequestSpec& request = node_workload.requests[i];
+            const std::size_t request_in_epoch =
+                i % config.requests_per_node_per_epoch;
+            const dm_sim::SimTime expected_offset =
+                (request_in_epoch / config.burst_size) *
+                    config.burst_interval +
+                (request_in_epoch % config.burst_size) *
+                    config.intra_burst_gap;
+            assert(request.scheduled_issue_offset == expected_offset);
+
+            if (request_in_epoch > 0) {
+                const RequestSpec& previous = node_workload.requests[i - 1];
+                assert(previous.epoch_id == request.epoch_id);
+                assert(previous.scheduled_issue_offset <=
+                       request.scheduled_issue_offset);
+            }
+        }
+    }
+}
+
+void test_scheduled_bursty_jitter_can_change_with_seed() {
+    SyntheticWorkloadConfig first_config = make_config();
+    first_config.issue_mode = WorkloadIssueMode::ScheduledBursty;
+    first_config.node_phase_jitter = 8;
+
+    const GeneratedWorkload first = generate_synthetic_workload(first_config);
+
+    bool saw_different_offset = false;
+    for (std::uint64_t seed_delta = 1;
+         seed_delta <= 20 && !saw_different_offset;
+         ++seed_delta) {
+        SyntheticWorkloadConfig second_config = first_config;
+        second_config.seed = first_config.seed + seed_delta;
+        const GeneratedWorkload second =
+            generate_synthetic_workload(second_config);
+
+        for (std::size_t node_index = 0;
+             node_index < first.node_workloads.size();
+             ++node_index) {
+            const std::vector<RequestSpec>& lhs =
+                first.node_workloads[node_index].requests;
+            const std::vector<RequestSpec>& rhs =
+                second.node_workloads[node_index].requests;
+            for (std::size_t i = 0; i < lhs.size(); ++i) {
+                if (lhs[i].scheduled_issue_offset !=
+                    rhs[i].scheduled_issue_offset) {
+                    saw_different_offset = true;
+                }
+            }
+        }
+    }
+
+    assert(saw_different_offset);
+}
+
+void test_scheduled_bursty_rejects_overlapping_burst_spacing() {
+    SyntheticWorkloadConfig config = make_config();
+    config.issue_mode = WorkloadIssueMode::ScheduledBursty;
+    config.burst_size = 4;
+    config.burst_interval = 2;
+    config.intra_burst_gap = 1;
+
+    try {
+        (void)generate_synthetic_workload(config);
+        assert(false);
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        assert(message.find("burst_interval") != std::string::npos);
     }
 }
 
@@ -436,6 +530,9 @@ int main() {
     test_overlap_presets_shape_hot_sets();
     test_partial_churn_preserves_overlap_presets();
     test_generated_request_counts_and_epochs();
+    test_scheduled_bursty_offsets_are_deterministic_and_ordered();
+    test_scheduled_bursty_jitter_can_change_with_seed();
+    test_scheduled_bursty_rejects_overlapping_burst_spacing();
     test_bimodal_sizes_are_per_object_and_do_not_change_access_order();
     test_hot_object_channel_restriction_places_hot_sets_on_selected_channels();
     test_hot_object_channel_restriction_validates_available_objects();

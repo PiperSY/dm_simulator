@@ -224,6 +224,16 @@ std::vector<EpochId> request_epochs(
     return epochs;
 }
 
+std::size_t telemetry_comparison_object_count(const Simulator& simulator) {
+    constexpr std::size_t kFallbackObjectCount = 5;
+    const std::optional<SyntheticWorkloadConfig>& workload =
+        simulator.config().synthetic_workload;
+    if (workload.has_value() && workload->hot_set_size > 0) {
+        return workload->hot_set_size;
+    }
+    return kFallbackObjectCount;
+}
+
 double value_spread(const std::vector<double>& values) {
     if (values.empty()) {
         return 0.0;
@@ -358,7 +368,8 @@ void write_summary_json(const std::filesystem::path& path,
     output << "\n";
     output << "  },\n";
     output << "  \"viability\": {\n";
-    output << "    \"top_k\": " << summary.viability.top_k << ",\n";
+    output << "    \"telemetry_comparison_object_count\": "
+           << summary.viability.telemetry_comparison_object_count << ",\n";
     output << "    \"admission_attempts\": "
            << summary.viability.admission_attempts << ",\n";
     output << "    \"successful_placements\": "
@@ -528,7 +539,8 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
     output << "node_id,epoch_id,request_id,object_id,admitted,reason,"
               "policy_variant,"
               "total_score,local_hotness,remote_accesses,distinct_requesters,"
-              "queue_wait,remote_service_time,size_penalty,evicted_objects\n";
+              "queue_wait,remote_service_time,cost_density,"
+              "cost_per_cache_byte,size_penalty,evicted_objects\n";
     output << std::fixed << std::setprecision(6);
     for (const PolicyDecisionRecord& decision :
          simulator.policy_diagnostics()) {
@@ -545,6 +557,8 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
                << decision.score.distinct_requesters << ","
                << decision.score.queue_wait << ","
                << decision.score.remote_service_time << ","
+               << decision.score.cost_density << ","
+               << decision.score.cost_per_cache_byte << ","
                << decision.score.size_penalty << ","
                << join_evicted_objects(decision.evicted_objects) << "\n";
     }
@@ -619,7 +633,7 @@ void write_viability_metrics_csv(const std::filesystem::path& path,
                                  path.string());
     }
 
-    output << "top_k,admission_attempts,successful_placements,"
+    output << "telemetry_comparison_object_count,admission_attempts,successful_placements,"
               "rejected_admissions,total_future_hits,admission_yield,"
               "placements_with_reuse,reuse_after_admit_rate,"
               "stale_telemetry_rate,average_top_object_overlap,"
@@ -632,7 +646,7 @@ void write_viability_metrics_csv(const std::filesystem::path& path,
 
     const ViabilityMetricsSummary& viability = summary.viability;
     output << std::fixed << std::setprecision(6);
-    output << viability.top_k << ","
+    output << viability.telemetry_comparison_object_count << ","
            << viability.admission_attempts << ","
            << viability.successful_placements << ","
            << viability.rejected_admissions << ","
@@ -657,10 +671,9 @@ void write_viability_metrics_csv(const std::filesystem::path& path,
 ViabilityMetricsSummary summarize_viability_metrics(
     const Simulator& simulator,
     const std::vector<PerNodeMetricsSummary>& per_node) {
-    constexpr std::size_t kTopK = 5;
-
     ViabilityMetricsSummary summary;
-    summary.top_k = kTopK;
+    summary.telemetry_comparison_object_count =
+        telemetry_comparison_object_count(simulator);
 
     const std::vector<CacheAdmissionRecord> admission_records =
         simulator.cache_admission_diagnostics();
@@ -693,7 +706,9 @@ ViabilityMetricsSummary summarize_viability_metrics(
     double stale_sum = 0.0;
     std::size_t comparable_epochs = 0;
     // Staleness is computed at epoch boundaries using previous contention and
-    // current request demand. Epoch 0 has no prior telemetry by design.
+    // current request demand. Synthetic workloads compare the full configured
+    // hot-set width instead of a fixed top-5, so near-top hot objects are not
+    // treated as completely stale just because the exact top five changed.
     for (EpochId epoch_id : request_epochs(simulator.requests())) {
         if (epoch_id == 0) {
             continue;
@@ -702,9 +717,13 @@ ViabilityMetricsSummary summarize_viability_metrics(
         EpochDiagnosticSummary epoch;
         epoch.epoch_id = epoch_id;
         epoch.previous_top_contended =
-            top_contended_objects(simulator.stats(), epoch_id - 1, kTopK);
+            top_contended_objects(simulator.stats(),
+                                  epoch_id - 1,
+                                  summary.telemetry_comparison_object_count);
         epoch.current_top_requested =
-            top_requested_objects(simulator.requests(), epoch_id, kTopK);
+            top_requested_objects(simulator.requests(),
+                                  epoch_id,
+                                  summary.telemetry_comparison_object_count);
         epoch.previous_top_count = epoch.previous_top_contended.size();
         epoch.current_top_count = epoch.current_top_requested.size();
         epoch.overlap_count = overlap_count(epoch.previous_top_contended,

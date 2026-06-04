@@ -5,7 +5,7 @@ experiment:
 memory:
   node_id: 99
   base_latency: 25
-  bandwidth_bytes_per_time: 8
+  bandwidth_bytes_per_time: 16
 
 link:
   one_way_latency: 6
