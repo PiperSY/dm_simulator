@@ -14,6 +14,14 @@ void CachePolicy::on_epoch_start(EpochId epoch_id) const {
     (void)epoch_id;
 }
 
+AdmissionDecision CachePolicy::admission_decision(
+    const Request& request,
+    const Response& response) const {
+    return should_admit(request, response)
+               ? AdmissionDecision{true, "admitted"}
+               : AdmissionDecision{false, "policy_rejected"};
+}
+
 void CachePolicy::on_admission_result(
     const Request& request,
     const Response& response,

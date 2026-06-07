@@ -150,10 +150,13 @@ ContentionPolicyVariant parse_contention_policy_variant(
     if (value == "hysteresis") {
         return ContentionPolicyVariant::Hysteresis;
     }
+    if (value == "smoothed_reuse_gated") {
+        return ContentionPolicyVariant::SmoothedReuseGated;
+    }
 
     throw std::invalid_argument(
         "Invalid local_cache.contention.variant: expected v1, smoothed, "
-        "reuse_gated, or hysteresis");
+        "reuse_gated, hysteresis, or smoothed_reuse_gated");
 }
 
 ContentionPolicyConfig parse_contention_policy_config(
@@ -250,6 +253,23 @@ ContentionPolicyConfig parse_contention_policy_config(
                 "expected a positive integer");
         }
     }
+    if (const YAML::Node confirmation_window =
+            contention_node["local_confirmation_window_epochs"]) {
+        config.local_confirmation_window_epochs =
+            confirmation_window.as<std::uint64_t>();
+        if (config.local_confirmation_window_epochs == 0) {
+            throw std::invalid_argument(
+                "Invalid "
+                "local_cache.contention.local_confirmation_window_epochs: "
+                "expected a positive integer");
+        }
+    }
+    config.local_confirmation_bypass_score_margin =
+        optional_nonnegative_double(
+            contention_node,
+            "local_confirmation_bypass_score_margin",
+            "local_cache.contention",
+            config.local_confirmation_bypass_score_margin);
     config.eviction_score_margin = optional_nonnegative_double(
         contention_node,
         "eviction_score_margin",

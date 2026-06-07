@@ -96,7 +96,7 @@ private:
     void record_hit(ObjectId object_id);
     void record_successful_placement(const Request& request,
                                      SimTime placement_time,
-                                     const char* reason,
+                                     const std::string& reason,
                                      const char* placement_source,
                                      const std::vector<ObjectId>& evicted_objects);
     void record_successful_replica(NodeId node_id,
@@ -106,7 +106,7 @@ private:
                                    SimTime placement_time);
     void record_rejected_admission(const Request& request,
                                    SimTime attempt_time,
-                                   const char* reason,
+                                   const std::string& reason,
                                    const std::vector<ObjectId>& evicted_objects);
 
     // Cache capacity in bytes, current occupancy in bytes, hit/miss statistics, and the cache policy used for admission and eviction decisions.

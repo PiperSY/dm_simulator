@@ -72,15 +72,36 @@ def test_heatmap_color_scale_helper(repo_root: Path) -> None:
             "Absolute heatmaps should use global min/max bounds")
 
 
+def test_policy_iteration_report_mode(repo_root: Path) -> None:
+    plot_results = load_plot_results_module(repo_root)
+    rows = [{"preset": "eval_policy_iteration"}]
+    require(
+        plot_results.detect_report_mode(rows, "auto") == "policy_viability",
+        "Policy-iteration preset should reuse policy-viability reports",
+    )
+
+
+def test_final_report_mode(repo_root: Path) -> None:
+    plot_results = load_plot_results_module(repo_root)
+    rows = [
+        {"preset": "eval_final_contention_scaling"},
+        {"preset": "eval_final_node_bandwidth"},
+        {"preset": "eval_final_policy_iteration"},
+        {"preset": "eval_bursty_calibration"},
+    ]
+    require(
+        plot_results.detect_report_mode(rows, "auto") == "final_report",
+        "Final-study aggregates should auto-detect the paper report mode",
+    )
+
+
 def run_plot_results(script: Path,
-                     fixture: Path,
+                     fixture: Path | list[Path],
                      output_dir: Path,
                      report_mode: Optional[str] = None) -> None:
     command = [
         sys.executable,
         str(script),
-        "--aggregate",
-        str(fixture),
         "--output-dir",
         str(output_dir),
         "--baseline",
@@ -88,9 +109,44 @@ def run_plot_results(script: Path,
         "--tie-threshold",
         "0.02",
     ]
+    fixtures = fixture if isinstance(fixture, list) else [fixture]
+    for aggregate in fixtures:
+        command.extend(["--aggregate", str(aggregate)])
     if report_mode is not None:
         command.extend(["--report-mode", report_mode])
     subprocess.run(command, check=True)
+
+
+def rewrite_fixture(
+    source: Path,
+    destination: Path,
+    preset: str,
+    seeds: tuple[str, ...] = ("8888",),
+) -> None:
+    """Copy fixture rows into a named final study and optional extra seeds."""
+
+    with source.open("r", encoding="utf-8", newline="") as input_file:
+        reader = csv.DictReader(input_file)
+        fieldnames = list(reader.fieldnames or [])
+        source_rows = list(reader)
+    rows = []
+    for seed_index, seed in enumerate(seeds):
+        for source_row in source_rows:
+            row = dict(source_row)
+            row["preset"] = preset
+            row["seed"] = seed
+            row["experiment_name"] = (
+                f"{row.get('experiment_name', 'fixture')}__seed-{seed}"
+            )
+            row["output_dir"] = f"{row.get('output_dir', '')}__seed-{seed}"
+            if seed_index and row.get("policy") != "lru":
+                # Give the second seed a small paired-policy perturbation so
+                # the final table exercises seed-level variation.
+                for column in ("mean_latency", "p99_latency"):
+                    if row.get(column):
+                        row[column] = str(float(row[column]) * 0.98)
+            rows.append(row)
+    write_rows(destination, fieldnames, rows)
 
 
 def write_contention_file(output_dir: Path,
@@ -148,6 +204,8 @@ def seed_calibration_contention_fixture(repo_root: Path) -> None:
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     test_heatmap_color_scale_helper(repo_root)
+    test_policy_iteration_report_mode(repo_root)
+    test_final_report_mode(repo_root)
 
     if importlib.util.find_spec("matplotlib") is None:
         print("Skipping plot_results smoke test: matplotlib is not installed")
@@ -570,6 +628,62 @@ def main() -> int:
             "Weight report should auto-detect weight-sensitivity mode")
     require("Contention Weight Sensitivity" in weight_report,
             "Weight report should group weight-sensitivity plots")
+
+    final_calibration = output_dir.parent / "aggregate_final_calibration.csv"
+    rewrite_fixture(
+        repo_root / "tests" / "fixtures" / "aggregate_summary_calibration.csv",
+        final_calibration,
+        "eval_final_contention_scaling",
+    )
+    final_node_bandwidth = (
+        output_dir.parent / "aggregate_final_node_bandwidth.csv"
+    )
+    rewrite_fixture(
+        repo_root / "tests" / "fixtures" / "aggregate_summary_interaction.csv",
+        final_node_bandwidth,
+        "eval_final_node_bandwidth",
+    )
+    final_policy = output_dir.parent / "aggregate_final_policy.csv"
+    rewrite_fixture(
+        repo_root / "tests" / "fixtures" / "aggregate_summary_viability.csv",
+        final_policy,
+        "eval_final_policy_iteration",
+        seeds=("8888", "1729"),
+    )
+    final_dir = output_dir.parent / "plot_results_final_report"
+    run_plot_results(
+        script,
+        [
+            final_calibration,
+            bursty_fixture,
+            final_node_bandwidth,
+            final_policy,
+        ],
+        final_dir,
+    )
+    final_files = [
+        final_dir / "plots" / "final_simulator_contention.svg",
+        final_dir / "plots" / "final_pressure_policy_scaling.svg",
+        final_dir / "plots" / "final_policy_operating_region.svg",
+        final_dir / "plots" / "final_policy_mechanisms.svg",
+        final_dir / "final_policy_table.csv",
+    ]
+    for path in final_files:
+        require(path.exists(), f"Missing final-report artifact: {path}")
+    final_table = read_rows(final_dir / "final_policy_table.csv")
+    smoothed = next(
+        row for row in final_table
+        if row["policy"] == "contention_aware_smoothed"
+    )
+    require(smoothed["seed_count"] == "2",
+            "Final policy table should summarize independent seed means")
+    require(smoothed["seed_std_latency_improvement_pct"] != "",
+            "Final policy table should report variation across seeds")
+    final_report = (final_dir / "report.md").read_text(encoding="utf-8")
+    require("Report mode: `final_report`" in final_report,
+            "Final aggregate bundle should auto-detect final-report mode")
+    require("Final Policy Table" in final_report,
+            "Final report should embed the compact policy table")
     return 0
 
 

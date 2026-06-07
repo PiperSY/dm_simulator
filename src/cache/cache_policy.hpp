@@ -33,7 +33,15 @@ struct PolicyDecisionRecord {
     std::string reason;
     std::string policy_variant;
     ContentionScoreComponents score;
+    std::uint64_t recent_local_confirmation_count = 0;
+    std::uint64_t required_local_confirmation_count = 0;
+    bool local_confirmation_bypassed = false;
     std::vector<ObjectId> evicted_objects;
+};
+
+struct AdmissionDecision {
+    bool admit = false;
+    std::string reason = "policy_rejected";
 };
 
 // Base class for cache policies
@@ -53,6 +61,11 @@ public:
     // Determines whether a request should be admitted into the cache based on the request and response
     [[nodiscard]] virtual bool should_admit(const Request& request,
                                             const Response& response) const = 0;
+    // Provides a policy-specific rejection reason while preserving the
+    // existing boolean admission interface for policies that do not need it.
+    [[nodiscard]] virtual AdmissionDecision admission_decision(
+        const Request& request,
+        const Response& response) const;
     // Selects a victim entry to evict from the cache when space is needed                                        
     [[nodiscard]] virtual std::optional<ObjectId> select_victim(
         const std::unordered_map<ObjectId, CacheEntry>& entries,

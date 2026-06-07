@@ -36,7 +36,7 @@ bool LocalCache::admit(const Request& request,
     // Keep policy diagnostics and policy-neutral lifecycle diagnostics in
     // lockstep, but keep their storage separate. Some policies have no score
     // diagnostics, yet every policy has admission outcomes worth comparing.
-    auto record_result = [&](bool admitted, const char* reason) {
+    auto record_result = [&](bool admitted, const std::string& reason) {
         policy_->on_admission_result(request,
                                      response,
                                      access_time,
@@ -58,8 +58,10 @@ bool LocalCache::admit(const Request& request,
         return admitted;
     };
 
-    if (!policy_->should_admit(request, response)) {
-        return record_result(false, "policy_rejected");
+    const AdmissionDecision decision =
+        policy_->admission_decision(request, response);
+    if (!decision.admit) {
+        return record_result(false, decision.reason);
     }
 
     if (request.size_bytes > capacity_bytes_) {
@@ -245,7 +247,7 @@ void LocalCache::record_hit(ObjectId object_id) {
 void LocalCache::record_successful_placement(
     const Request& request,
     SimTime placement_time,
-    const char* reason,
+    const std::string& reason,
     const char* placement_source,
     const std::vector<ObjectId>& evicted_objects) {
     CacheAdmissionRecord record;
@@ -292,7 +294,7 @@ void LocalCache::record_successful_replica(NodeId node_id,
 void LocalCache::record_rejected_admission(
     const Request& request,
     SimTime attempt_time,
-    const char* reason,
+    const std::string& reason,
     const std::vector<ObjectId>& evicted_objects) {
     CacheAdmissionRecord record;
     record.node_id = request.source_node_id;

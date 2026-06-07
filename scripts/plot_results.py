@@ -29,6 +29,8 @@ PREFERRED_POLICY_ORDER = (
     "contention_aware",
     "contention_aware_v1",
     "contention_aware_smoothed",
+    "contention_aware_smoothed_reuse_gated",
+    "contention_aware_smoothed_reuse_gated_hysteresis",
     "contention_aware_size_value",
     "contention_aware_reuse_gated",
     "contention_aware_hysteresis",
@@ -154,6 +156,43 @@ POLICY_SUMMARY_COLUMNS = (
     "avg_eviction_regret_count",
     "avg_jain_inverse_latency_fairness",
     "avg_jain_inverse_latency_fairness_delta",
+)
+
+FINAL_POLICY_TABLE_COLUMNS = (
+    "policy",
+    "seed_count",
+    "comparable_run_count",
+    "win_rate",
+    "mean_latency_improvement_pct",
+    "seed_std_latency_improvement_pct",
+    "mean_p99_improvement_pct",
+    "seed_std_p99_improvement_pct",
+    "mean_memory_wait_reduction_pct",
+    "seed_std_memory_wait_reduction_pct",
+    "mean_local_hit_rate",
+    "seed_std_local_hit_rate",
+)
+
+FINAL_REPORT_PRESETS = {
+    "eval_final_contention_scaling",
+    "eval_final_node_bandwidth",
+    "eval_final_policy_iteration",
+}
+
+FINAL_REPORT_POLICY_PRESETS = {
+    "eval_final_policy_iteration",
+    # Accept the exploratory preset as a fallback so older pilot results can be
+    # rendered with the paper-oriented report before final reruns finish.
+    "eval_policy_iteration",
+}
+
+FINAL_REPORT_POLICY_ORDER = (
+    "lru",
+    "hotness_only_windowed",
+    "contention_aware_smoothed",
+    "contention_aware_smoothed_reuse_gated",
+    "contention_aware_smoothed_reuse_gated_hysteresis",
+    "contention_aware_size_value",
 )
 
 CONDITION_COLUMNS = (
@@ -284,6 +323,7 @@ REPORT_MODES = (
     "interaction",
     "parameter_demo",
     "weight_sensitivity",
+    "final_report",
 )
 
 CATEGORICAL_ORDER = {
@@ -452,6 +492,10 @@ def detect_report_mode(rows: list[dict[str, str]], requested: str) -> str:
     if requested != "auto":
         return requested
     presets = distinct_values(rows, "preset")
+    if presets and any(preset in FINAL_REPORT_PRESETS for preset in presets):
+        allowed = FINAL_REPORT_PRESETS | {"eval_bursty_calibration"}
+        if all(preset in allowed for preset in presets):
+            return "final_report"
     if len(presets) != 1:
         return "generic"
     preset = presets[0]
@@ -459,7 +503,7 @@ def detect_report_mode(rows: list[dict[str, str]], requested: str) -> str:
             preset == "eval_bursty_calibration" or
             preset.startswith("eval_channel_")):
         return "contention_calibration"
-    if preset == "eval_policy_viability":
+    if preset in {"eval_policy_viability", "eval_policy_iteration"}:
         return "policy_viability"
     if preset.startswith("eval_interactions_"):
         return "interaction"
@@ -767,6 +811,115 @@ def average(rows: list[dict[str, Any]], column: str) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def sample_standard_deviation(values: list[float]) -> float | None:
+    """Return sample standard deviation, or no value for one seed."""
+
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (
+        len(values) - 1
+    )
+    return math.sqrt(variance)
+
+
+def rows_for_preferred_presets(
+    rows: list[dict[str, Any]],
+    preferred: set[str],
+    fallback: set[str],
+) -> list[dict[str, Any]]:
+    """Use final-study rows when present, otherwise accept pilot-study rows."""
+
+    selected = [
+        row for row in rows if str(row.get("preset", "")) in preferred
+    ]
+    if selected:
+        return selected
+    return [row for row in rows if str(row.get("preset", "")) in fallback]
+
+
+def build_final_policy_table(
+    comparison_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Summarize final policy results with variation across seed means."""
+
+    rows = rows_for_preferred_presets(
+        comparison_rows,
+        {"eval_final_policy_iteration"},
+        {"eval_policy_iteration"},
+    )
+    by_policy: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        policy = str(row.get("policy", ""))
+        if policy in FINAL_REPORT_POLICY_ORDER:
+            by_policy[policy].append(row)
+
+    table: list[dict[str, Any]] = []
+    metric_specs = (
+        (
+            "mean_latency_delta_pct",
+            "mean_latency_improvement_pct",
+            "seed_std_latency_improvement_pct",
+            -100.0,
+        ),
+        (
+            "p99_latency_delta_pct",
+            "mean_p99_improvement_pct",
+            "seed_std_p99_improvement_pct",
+            -100.0,
+        ),
+        (
+            "average_memory_wait_delta_pct",
+            "mean_memory_wait_reduction_pct",
+            "seed_std_memory_wait_reduction_pct",
+            -100.0,
+        ),
+        (
+            "local_hit_rate",
+            "mean_local_hit_rate",
+            "seed_std_local_hit_rate",
+            1.0,
+        ),
+    )
+    for policy in FINAL_REPORT_POLICY_ORDER:
+        policy_rows = by_policy.get(policy, [])
+        if not policy_rows:
+            continue
+        by_seed: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in policy_rows:
+            by_seed[str(row.get("seed", ""))].append(row)
+
+        result: dict[str, Any] = {
+            "policy": policy,
+            "seed_count": len(by_seed),
+            "comparable_run_count": sum(
+                row.get("classification") != "no_baseline"
+                for row in policy_rows
+            ),
+        }
+        comparable = [
+            row for row in policy_rows
+            if row.get("classification") != "no_baseline"
+        ]
+        result["win_rate"] = (
+            count_class(comparable, "win") / len(comparable)
+            if comparable
+            else None
+        )
+        for source, mean_column, std_column, scale in metric_specs:
+            seed_means = []
+            for seed_rows in by_seed.values():
+                seed_mean = average(seed_rows, source)
+                if seed_mean is not None:
+                    seed_means.append(scale * seed_mean)
+            result[mean_column] = (
+                sum(seed_means) / len(seed_means) if seed_means else None
+            )
+            result[std_column] = sample_standard_deviation(seed_means)
+        table.append(result)
+    return table
 
 
 def count_class(rows: list[dict[str, Any]], name: str) -> int:
@@ -2465,6 +2618,562 @@ def make_fairness_plot(plt: Any,
     )
 
 
+FINAL_POLICY_COLORS = {
+    "always_remote": "#6f6f6f",
+    "lru": "#1f1f1f",
+    "hotness_only_windowed": "#d17a00",
+    "contention_aware_smoothed": "#1f77b4",
+    "contention_aware_smoothed_reuse_gated": "#2ca02c",
+    "contention_aware_smoothed_reuse_gated_hysteresis": "#c43c39",
+    "contention_aware_size_value": "#7a5195",
+}
+
+FINAL_POLICY_LABELS = {
+    "always_remote": "Always remote",
+    "lru": "LRU",
+    "hotness_only_windowed": "Windowed hotness",
+    "contention_aware_smoothed": "Smoothed CA",
+    "contention_aware_smoothed_reuse_gated": "Smoothed + confirmation",
+    "contention_aware_smoothed_reuse_gated_hysteresis":
+        "Smoothed + confirmation + hysteresis",
+    "contention_aware_size_value": "Smoothed + cost density",
+}
+
+
+def final_policy_label(policy: str) -> str:
+    """Return compact labels suitable for paper figure legends."""
+
+    return FINAL_POLICY_LABELS.get(policy, policy)
+
+
+def final_study_rows(
+    rows: list[dict[str, Any]],
+    final_preset: str,
+    fallback_preset: str,
+) -> list[dict[str, Any]]:
+    """Select final-study rows while allowing exploratory-result previews."""
+
+    return rows_for_preferred_presets(
+        rows,
+        {final_preset},
+        {fallback_preset},
+    )
+
+
+def final_metric_value(
+    row: dict[str, Any],
+    column: str,
+    fallback: str | None = None,
+) -> float | None:
+    """Read a final-figure metric with an optional legacy-column fallback."""
+
+    value = value_for_plot(row, column)
+    if value is None and fallback is not None:
+        return value_for_plot(row, fallback)
+    return value
+
+
+def final_grouped_points(
+    rows: list[dict[str, Any]],
+    dimensions: tuple[str, ...],
+    metric_column: str,
+    scale: float = 1.0,
+    fallback_metric: str | None = None,
+) -> dict[tuple[str, ...], float]:
+    """Average a displayed metric over all dimensions not named by the plot."""
+
+    grouped: dict[tuple[str, ...], list[float]] = defaultdict(list)
+    for row in rows:
+        value = final_metric_value(row, metric_column, fallback_metric)
+        key = tuple(str(row.get(column, "")) for column in dimensions)
+        if value is None or any(not part for part in key):
+            continue
+        grouped[key].append(scale * value)
+    return {
+        key: sum(values) / len(values)
+        for key, values in grouped.items()
+        if values
+    }
+
+
+def final_simulator_contention_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Create the paper view that validates queue scaling and burst pressure."""
+
+    calibration_rows = final_study_rows(
+        comparison_rows,
+        "eval_final_contention_scaling",
+        "eval_contention_calibration",
+    )
+    burst_rows = [
+        row for row in comparison_rows
+        if str(row.get("preset", "")) == "eval_bursty_calibration"
+    ]
+    if not calibration_rows:
+        return plot_placeholder(
+            plt,
+            "Simulator contention calibration",
+            "No final contention-scaling rows were supplied.",
+        )
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(13.5, 8.2),
+        constrained_layout=True,
+    )
+    scale_specs = (
+        (
+            "average_memory_wait",
+            None,
+            "Average memory wait",
+        ),
+        (
+            "peak_memory_channel_queue_depth",
+            "peak_memory_queue_depth",
+            "Peak channel queue depth",
+        ),
+    )
+    bandwidth_styles = {
+        "mild": "-",
+        "moderate": "--",
+        "severe": ":",
+    }
+    policies = [
+        policy for policy in ("always_remote", "lru")
+        if any(row.get("policy") == policy for row in calibration_rows)
+    ]
+    for ax, (metric_column, fallback, ylabel) in zip(
+        axes[0],
+        scale_specs,
+    ):
+        grouped = final_grouped_points(
+            calibration_rows,
+            ("policy", "memory_bandwidth_level", "node_count"),
+            metric_column,
+            fallback_metric=fallback,
+        )
+        for policy in policies:
+            for bandwidth in distinct_values(
+                calibration_rows,
+                "memory_bandwidth_level",
+            ):
+                points = []
+                for node_count in distinct_values(
+                    calibration_rows,
+                    "node_count",
+                ):
+                    value = grouped.get((policy, bandwidth, node_count))
+                    numeric_node = float_or_none(node_count)
+                    if value is not None and numeric_node is not None:
+                        points.append((numeric_node, value))
+                if not points:
+                    continue
+                points.sort()
+                ax.plot(
+                    [point[0] for point in points],
+                    [point[1] for point in points],
+                    marker="o",
+                    color=FINAL_POLICY_COLORS.get(policy),
+                    linestyle=bandwidth_styles.get(bandwidth, "-"),
+                    label=f"{final_policy_label(policy)}, {bandwidth}",
+                )
+        ax.set_xlabel("Compute node count")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+
+    axes[0][0].legend(fontsize="x-small", ncol=2)
+    burst_specs = (
+        ("average_memory_wait", "Average memory wait"),
+        ("p99_latency", "P99 request latency"),
+    )
+    for ax, (metric_column, ylabel) in zip(axes[1], burst_specs):
+        if not burst_rows:
+            ax.axis("off")
+            ax.text(
+                0.5,
+                0.5,
+                "Add eval_bursty_calibration to show\n"
+                "completion-driven vs scheduled-bursty pressure.",
+                ha="center",
+                va="center",
+            )
+            continue
+        modes = distinct_values(burst_rows, "workload_issue_mode")
+        grouped = final_grouped_points(
+            burst_rows,
+            ("policy", "workload_issue_mode"),
+            metric_column,
+        )
+        bar_width = 0.36
+        for policy_index, policy in enumerate(
+            [
+                item for item in ("always_remote", "lru")
+                if any(row.get("policy") == item for row in burst_rows)
+            ]
+        ):
+            values = [
+                grouped.get((policy, mode), 0.0) for mode in modes
+            ]
+            offset = (policy_index - 0.5) * bar_width
+            ax.bar(
+                [index + offset for index in range(len(modes))],
+                values,
+                width=bar_width,
+                color=FINAL_POLICY_COLORS.get(policy),
+                label=final_policy_label(policy),
+            )
+        ax.set_xticks(range(len(modes)))
+        ax.set_xticklabels(
+            [mode.replace("_", " ") for mode in modes],
+            rotation=12,
+        )
+        ax.set_ylabel(ylabel)
+        ax.grid(axis="y", alpha=0.25)
+    if burst_rows:
+        axes[1][0].legend(fontsize="small")
+    fig.suptitle(
+        "Simulator contention scales with demand and overlapping arrivals",
+        fontsize=15,
+    )
+    return fig
+
+
+def final_pressure_policy_scaling_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot policy gains as node pressure rises at bandwidth endpoints."""
+
+    rows = final_study_rows(
+        comparison_rows,
+        "eval_final_node_bandwidth",
+        "eval_interactions_node_bandwidth",
+    )
+    rows = [
+        row for row in rows
+        if str(row.get("policy", "")) in FINAL_REPORT_POLICY_ORDER
+        and str(row.get("policy", "")) != "lru"
+    ]
+    if not rows:
+        return plot_placeholder(
+            plt,
+            "Policy benefit under memory pressure",
+            "No final node-bandwidth policy rows were supplied.",
+        )
+    available_bandwidths = distinct_values(rows, "memory_bandwidth_level")
+    bandwidths = [
+        value for value in ("mild", "severe")
+        if value in available_bandwidths
+    ] or available_bandwidths
+    metrics = (
+        (
+            "mean_latency_delta_pct",
+            "Mean latency improvement vs LRU (%)",
+        ),
+        (
+            "average_memory_wait_delta_pct",
+            "Memory-wait reduction vs LRU (%)",
+        ),
+    )
+    fig, axes = plt.subplots(
+        len(metrics),
+        len(bandwidths),
+        figsize=(6.2 * len(bandwidths), 7.6),
+        squeeze=False,
+        sharex="col",
+    )
+    for column_index, bandwidth in enumerate(bandwidths):
+        bandwidth_rows = [
+            row for row in rows
+            if str(row.get("memory_bandwidth_level", "")) == bandwidth
+        ]
+        for metric_index, (metric_column, ylabel) in enumerate(metrics):
+            ax = axes[metric_index][column_index]
+            grouped = final_grouped_points(
+                bandwidth_rows,
+                ("policy", "node_count"),
+                metric_column,
+                scale=-100.0,
+            )
+            for policy in FINAL_REPORT_POLICY_ORDER:
+                if policy == "lru":
+                    continue
+                points = []
+                for node_count in distinct_values(
+                    bandwidth_rows,
+                    "node_count",
+                ):
+                    value = grouped.get((policy, node_count))
+                    numeric_node = float_or_none(node_count)
+                    if value is not None and numeric_node is not None:
+                        points.append((numeric_node, value))
+                if points:
+                    points.sort()
+                    ax.plot(
+                        [point[0] for point in points],
+                        [point[1] for point in points],
+                        marker="o",
+                        color=FINAL_POLICY_COLORS.get(policy),
+                        label=final_policy_label(policy),
+                    )
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+            ax.grid(alpha=0.25)
+            if metric_index == 0:
+                ax.set_title(f"{bandwidth.title()} memory bandwidth")
+            if column_index == 0:
+                ax.set_ylabel(ylabel)
+            if metric_index == len(metrics) - 1:
+                ax.set_xlabel("Compute node count")
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="center right",
+            bbox_to_anchor=(0.995, 0.5),
+            ncol=1,
+            fontsize="small",
+        )
+    fig.suptitle(
+        "Contention-aware benefit as shared-memory pressure increases",
+        fontsize=15,
+    )
+    fig.tight_layout(rect=[0.0, 0.0, 0.78, 0.94])
+    return fig
+
+
+def final_policy_operating_region_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Plot cache-pressure response without averaging over churn or RPE."""
+
+    rows = final_study_rows(
+        comparison_rows,
+        "eval_final_policy_iteration",
+        "eval_policy_iteration",
+    )
+    rows = [
+        row for row in rows
+        if str(row.get("policy", "")) in FINAL_REPORT_POLICY_ORDER
+        and str(row.get("policy", "")) != "lru"
+    ]
+    churn_values = distinct_values(rows, "hot_set_churn_fraction")
+    rpe_values = distinct_values(rows, "requests_per_node_per_epoch")
+    if not rows or not churn_values or not rpe_values:
+        return plot_placeholder(
+            plt,
+            "Latest-policy operating region",
+            "No final policy-iteration rows were supplied.",
+        )
+
+    fig, axes = plt.subplots(
+        len(rpe_values),
+        len(churn_values),
+        figsize=(4.8 * len(churn_values), 3.8 * len(rpe_values)),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    for row_index, rpe in enumerate(rpe_values):
+        for column_index, churn in enumerate(churn_values):
+            ax = axes[row_index][column_index]
+            facet_rows = [
+                row for row in rows
+                if str(row.get("requests_per_node_per_epoch", "")) == rpe
+                and str(row.get("hot_set_churn_fraction", "")) == churn
+            ]
+            grouped = final_grouped_points(
+                facet_rows,
+                ("policy", "cache_capacity_hotset_multiplier"),
+                "mean_latency_delta_pct",
+                scale=-100.0,
+            )
+            for policy in FINAL_REPORT_POLICY_ORDER:
+                if policy == "lru":
+                    continue
+                points = []
+                for cache_multiplier in distinct_values(
+                    facet_rows,
+                    "cache_capacity_hotset_multiplier",
+                ):
+                    value = grouped.get((policy, cache_multiplier))
+                    numeric_cache = float_or_none(cache_multiplier)
+                    if value is not None and numeric_cache is not None:
+                        points.append((numeric_cache, value))
+                if points:
+                    points.sort()
+                    ax.plot(
+                        [point[0] for point in points],
+                        [point[1] for point in points],
+                        marker="o",
+                        color=FINAL_POLICY_COLORS.get(policy),
+                        label=final_policy_label(policy),
+                    )
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+            ax.grid(alpha=0.25)
+            if row_index == 0:
+                ax.set_title(f"Churn = {churn}")
+            if column_index == 0:
+                ax.set_ylabel(
+                    f"RPE = {rpe}\nLatency improvement vs LRU (%)"
+                )
+            if row_index == len(rpe_values) - 1:
+                ax.set_xlabel("Cache capacity / hot-set footprint")
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="center right",
+            bbox_to_anchor=(0.995, 0.5),
+            ncol=1,
+            fontsize="small",
+        )
+    fig.suptitle(
+        "Latest-policy operating region across churn, reuse, and cache pressure",
+        fontsize=15,
+    )
+    fig.tight_layout(rect=[0.0, 0.0, 0.76, 0.94])
+    return fig
+
+
+def final_policy_mechanism_plot(
+    plt: Any,
+    comparison_rows: list[dict[str, Any]],
+) -> Any:
+    """Explain policy gains through pressure reduction and placement quality."""
+
+    rows = final_study_rows(
+        comparison_rows,
+        "eval_final_policy_iteration",
+        "eval_policy_iteration",
+    )
+    mechanism_policies = {
+        "contention_aware_smoothed",
+        "contention_aware_smoothed_reuse_gated",
+        "contention_aware_smoothed_reuse_gated_hysteresis",
+        "contention_aware_size_value",
+    }
+    rows = [
+        row for row in rows
+        if str(row.get("policy", "")) in mechanism_policies
+    ]
+    if not rows:
+        return plot_placeholder(
+            plt,
+            "Contention-aware policy mechanisms",
+            "No latest contention-aware policy rows were supplied.",
+        )
+    metrics = (
+        (
+            "total_remote_accesses_delta_pct",
+            "Remote-access reduction vs LRU (%)",
+            -100.0,
+        ),
+        (
+            "average_memory_wait_delta_pct",
+            "Memory-wait reduction vs LRU (%)",
+            -100.0,
+        ),
+        (
+            "admission_yield",
+            "Admission yield (future hits / placement)",
+            1.0,
+        ),
+        ("reuse_after_admit_rate", "Reuse after admission (%)", 100.0),
+    )
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(13, 8),
+        sharex=True,
+    )
+    for ax, (metric_column, ylabel, scale) in zip(axes.flat, metrics):
+        grouped = final_grouped_points(
+            rows,
+            ("policy", "hot_set_churn_fraction"),
+            metric_column,
+            scale=scale,
+        )
+        for policy in FINAL_REPORT_POLICY_ORDER:
+            if policy not in mechanism_policies:
+                continue
+            points = []
+            for churn in distinct_values(rows, "hot_set_churn_fraction"):
+                value = grouped.get((policy, churn))
+                numeric_churn = float_or_none(churn)
+                if value is not None and numeric_churn is not None:
+                    points.append((numeric_churn, value))
+            if points:
+                points.sort()
+                ax.plot(
+                    [point[0] for point in points],
+                    [point[1] for point in points],
+                    marker="o",
+                    color=FINAL_POLICY_COLORS.get(policy),
+                    label=final_policy_label(policy),
+                )
+        if "reduction" in ylabel.lower():
+            ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.45)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("Hot-set churn fraction")
+        ax.grid(alpha=0.25)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles,
+            labels,
+            loc="center right",
+            bbox_to_anchor=(0.995, 0.5),
+            ncol=1,
+            fontsize="small",
+        )
+    fig.suptitle(
+        "Why the latest contention-aware variants behave differently",
+        fontsize=15,
+    )
+    fig.tight_layout(rect=[0.0, 0.0, 0.77, 0.94])
+    return fig
+
+
+def generate_final_report_plots(
+    plt: Any,
+    plots_dir: Path,
+    formats: list[str],
+    comparison_rows: list[dict[str, Any]],
+) -> list[PlotOutput]:
+    """Generate only the four figures intended for the final report."""
+
+    return save_plot_specs(
+        plt,
+        plots_dir,
+        formats,
+        "Final Report Figures",
+        [
+            (
+                "final_simulator_contention",
+                final_simulator_contention_plot(plt, comparison_rows),
+            ),
+            (
+                "final_pressure_policy_scaling",
+                final_pressure_policy_scaling_plot(plt, comparison_rows),
+            ),
+            (
+                "final_policy_operating_region",
+                final_policy_operating_region_plot(plt, comparison_rows),
+            ),
+            (
+                "final_policy_mechanisms",
+                final_policy_mechanism_plot(plt, comparison_rows),
+            ),
+        ],
+    )
+
+
 def save_plot_specs(plt: Any,
                     plots_dir: Path,
                     formats: list[str],
@@ -3153,6 +3862,15 @@ def generate_plots(plt: Any,
 
     plots_dir = output_dir / "plots"
     swept = swept_dimensions(dimensions)
+    if report_mode == "final_report":
+        # The paper bundle is intentionally compact. Exploratory common plots
+        # remain available through the existing mode-specific reports.
+        return generate_final_report_plots(
+            plt,
+            plots_dir,
+            formats,
+            comparison_rows,
+        )
     outputs = generate_common_plots(
         plt,
         plots_dir,
@@ -3287,6 +4005,58 @@ def build_observations(
 
     observations: list[str] = []
     swept = swept_dimensions(dimensions)
+    if report_mode == "final_report":
+        seeds = distinct_values(comparison_rows, "seed")
+        observations.append(
+            f"Final-study estimates include {len(seeds)} matched workload "
+            f"seed{'s' if len(seeds) != 1 else ''}."
+        )
+        calibration_rows = final_study_rows(
+            comparison_rows,
+            "eval_final_contention_scaling",
+            "eval_contention_calibration",
+        )
+        node_values = distinct_values(calibration_rows, "node_count")
+        if len(node_values) >= 2:
+            low_wait = average_for_dimension_value(
+                calibration_rows,
+                "node_count",
+                node_values[0],
+                "average_memory_wait",
+            )
+            high_wait = average_for_dimension_value(
+                calibration_rows,
+                "node_count",
+                node_values[-1],
+                "average_memory_wait",
+            )
+            if low_wait is not None and high_wait is not None:
+                observations.append(
+                    "Average memory wait changed from "
+                    f"{low_wait:.2f} at {node_values[0]} nodes to "
+                    f"{high_wait:.2f} at {node_values[-1]} nodes."
+                )
+        final_table = build_final_policy_table(comparison_rows)
+        candidates = [
+            row for row in final_table
+            if row.get("policy") != "lru"
+            and value_for_plot(row, "mean_latency_improvement_pct") is not None
+        ]
+        if candidates:
+            best = max(
+                candidates,
+                key=lambda row: value_for_plot(
+                    row,
+                    "mean_latency_improvement_pct",
+                ) or float("-inf"),
+            )
+            observations.append(
+                f"`{best['policy']}` had the largest condition-averaged "
+                "latency improvement in the final policy study "
+                f"({best['mean_latency_improvement_pct']:.1f}%)."
+            )
+        return observations
+
     if report_mode == "contention_calibration":
         concentration = object_concentration_by_run(comparison_rows, top_k=5)
         if concentration:
@@ -3445,7 +4215,8 @@ def write_report(path: Path,
                  comparison_rows: list[dict[str, Any]],
                  report_mode: str,
                  dimensions: dict[str, dict[str, Any]],
-                 best_run_summary: list[dict[str, Any]]) -> None:
+                 best_run_summary: list[dict[str, Any]],
+                 final_policy_table: list[dict[str, Any]]) -> None:
     """Write the Phase F Markdown report."""
 
     rel_plots_by_group: dict[str, list[Path]] = defaultdict(list)
@@ -3516,9 +4287,14 @@ def write_report(path: Path,
             "",
             *[f"- {observation}" for observation in observations],
             "",
-            "## Policy Summary",
-            "",
-            markdown_table(
+        ]
+    )
+    if report_mode != "final_report":
+        lines.extend(
+            [
+                "## Policy Summary",
+                "",
+                markdown_table(
                 sorted_summary,
                 [
                     ("Policy", "policy"),
@@ -3533,9 +4309,9 @@ def write_report(path: Path,
                     ("Avg Fairness", "avg_jain_inverse_latency_fairness"),
                 ],
             ),
-            "",
-        ]
-    )
+                "",
+            ]
+        )
     if report_mode == "policy_viability":
         lines.extend(
             [
@@ -3558,6 +4334,33 @@ def write_report(path: Path,
                         ("Large Obj P", "large_object_probability"),
                         ("Channels", "memory_channel_count"),
                         ("Hot Channels", "hot_object_channel_count"),
+                    ],
+                ),
+                "",
+            ]
+        )
+    if report_mode == "final_report":
+        lines.extend(
+            [
+                "## Final Policy Table",
+                "",
+                "Improvements and reductions are positive-is-better. "
+                "Variation is the sample standard deviation of per-seed means "
+                "after averaging matched conditions within each seed.",
+                "",
+                markdown_table(
+                    final_policy_table,
+                    [
+                        ("Policy", "policy"),
+                        ("Seeds", "seed_count"),
+                        ("Runs", "comparable_run_count"),
+                        ("Win Rate", "win_rate"),
+                        ("Mean Latency Improve %", "mean_latency_improvement_pct"),
+                        ("Seed SD", "seed_std_latency_improvement_pct"),
+                        ("P99 Improve %", "mean_p99_improvement_pct"),
+                        ("Memory-Wait Reduce %",
+                         "mean_memory_wait_reduction_pct"),
+                        ("Hit Rate", "mean_local_hit_rate"),
                     ],
                 ),
                 "",
@@ -3637,6 +4440,20 @@ def write_report(path: Path,
                 "",
             ]
         )
+    if report_mode == "final_report":
+        lines.extend(
+            [
+                "The four final-report figures answer distinct questions: "
+                "whether the simulator creates pressure, whether policy benefit "
+                "grows with pressure, where the latest policies operate well, "
+                "and which placement mechanisms explain their behavior.",
+                "",
+                "Do not treat best individual cells as independent evidence. "
+                "Use the paired condition deltas and variation across workload "
+                "seeds when stating quantitative conclusions.",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Generated Files",
@@ -3650,6 +4467,11 @@ def write_report(path: Path,
                     "- `viability_best_run_policy_context.csv`",
                 ]
                 if report_mode == "policy_viability"
+                else []
+            ),
+            *(
+                ["- `final_policy_table.csv`"]
+                if report_mode == "final_report"
                 else []
             ),
             "- `plots/`",
@@ -3695,6 +4517,9 @@ def main() -> int:
         best_run_summary, best_run_context = build_best_run_examples(
             comparison_rows,
         )
+    final_policy_table: list[dict[str, Any]] = []
+    if report_mode == "final_report":
+        final_policy_table = build_final_policy_table(comparison_rows)
 
     write_csv(output_dir / "policy_comparison.csv",
               COMPARISON_COLUMNS,
@@ -3712,6 +4537,12 @@ def main() -> int:
         write_csv(output_dir / "viability_best_run_policy_context.csv",
                   BEST_RUN_CONTEXT_COLUMNS,
                   best_run_context)
+    if report_mode == "final_report":
+        write_csv(
+            output_dir / "final_policy_table.csv",
+            FINAL_POLICY_TABLE_COLUMNS,
+            final_policy_table,
+        )
     plot_paths = generate_plots(
         plt,
         output_dir,
@@ -3734,6 +4565,7 @@ def main() -> int:
         report_mode,
         dimensions,
         best_run_summary,
+        final_policy_table,
     )
     print(f"Wrote analysis report: {output_dir / 'report.md'}", flush=True)
     return 0

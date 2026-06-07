@@ -1,0 +1,369 @@
+# Build, Run, And Evaluation Quick Reference
+
+Use this file for common commands. Detailed experiment dimensions and expected
+interpretations are documented in `docs/testing_evaluation_plan.md`; preset
+definitions live in `scripts/run_matrix.py`.
+
+## Quick Start
+
+Configure, build, and test:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Run the focused current-policy study:
+
+```bash
+scripts/run_matrix.py \
+  --preset eval_policy_iteration \
+  --results-dir results/eval_policy_iteration
+```
+
+Generate its plots and Markdown report:
+
+```bash
+scripts/plot_results.py \
+  --aggregate results/eval_policy_iteration/aggregate_summary.csv \
+  --output-dir results/eval_policy_iteration/analysis \
+  --baseline lru \
+  --report-mode auto
+```
+
+## Build And Test
+
+First-time or Debug configuration:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+```
+
+Rebuild after normal C++ changes:
+
+```bash
+cmake --build build
+```
+
+Run all registered tests:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Run tests matching a name or group:
+
+```bash
+ctest --test-dir build -R scheduler --output-on-failure
+ctest --test-dir build -R "cache|config_loader" --output-on-failure
+```
+
+List registered tests:
+
+```bash
+ctest --test-dir build -N
+```
+
+Run a test executable directly:
+
+```bash
+./build/test_scheduler
+```
+
+Re-run CMake configuration after changing `CMakeLists.txt`, adding source
+files, or changing build options. For ordinary `.cpp` or `.hpp` edits,
+`cmake --build build` is normally sufficient.
+
+## Single YAML Experiments
+
+Run one configuration:
+
+```bash
+./build/dm_simulator --config configs/small.yaml
+```
+
+Override its result directory:
+
+```bash
+./build/dm_simulator \
+  --config configs/manual_phase8_contention_size_value.yaml \
+  --output-dir results/manual_contention_size_value
+```
+
+Show simulator options:
+
+```bash
+./build/dm_simulator --help
+```
+
+Run several matched hand-written configurations:
+
+```bash
+scripts/run_experiments.py \
+  configs/manual_phase8_lru.yaml \
+  configs/manual_phase8_hotness_windowed.yaml \
+  configs/manual_phase8_contention_size_value.yaml \
+  --results-dir results/manual_policy_comparison
+```
+
+`run_experiments.py` creates one result subdirectory per YAML file. It does not
+create the matched aggregate CSV produced by `run_matrix.py`.
+
+## Matrix Workflow
+
+Dry-run a preset before launching simulations:
+
+```bash
+scripts/run_matrix.py \
+  --preset <preset> \
+  --dry-run \
+  --results-dir results/<results-name>_dry_run
+```
+
+Optionally assert a known run count during a dry-run:
+
+```bash
+scripts/run_matrix.py \
+  --preset <preset> \
+  --dry-run \
+  --expect-runs <count> \
+  --results-dir results/<results-name>_dry_run
+```
+
+Run the full preset:
+
+```bash
+scripts/run_matrix.py \
+  --preset <preset> \
+  --results-dir results/<results-name>
+```
+
+Continue other runs if one simulator invocation fails:
+
+```bash
+scripts/run_matrix.py \
+  --preset <preset> \
+  --keep-going \
+  --results-dir results/<results-name>
+```
+
+Narrow or override a preset from the command line:
+
+```bash
+scripts/run_matrix.py \
+  --preset eval_policy_iteration \
+  --policies lru,hotness_only_windowed,contention_aware_smoothed \
+  --seeds 8888,1729,31415 \
+  --churn-fractions 0.1,0.3 \
+  --cache-hotset-multipliers 0.4,0.6 \
+  --results-dir results/policy_iteration_probe
+```
+
+Generate plots from one recognized evaluation preset:
+
+```bash
+scripts/plot_results.py \
+  --aggregate results/<results-name>/aggregate_summary.csv \
+  --output-dir results/<results-name>/analysis \
+  --baseline lru \
+  --report-mode auto
+```
+
+For a single recognized evaluation aggregate, prefer `--report-mode auto`.
+When changing evaluations, normally update:
+
+- `--preset`
+- `--results-dir`
+- the plotter's `--aggregate` path
+- the plotter's `--output-dir`
+- `--report-mode` only when auto-detection is unsuitable
+
+## Current Evaluation Examples
+
+### Focused Policy Iteration
+
+This is the primary compact comparison of the latest contention-aware
+policies against LRU and windowed hotness.
+
+```bash
+scripts/run_matrix.py \
+  --preset eval_policy_iteration \
+  --dry-run \
+  --results-dir results/eval_policy_iteration_dry_run
+
+scripts/run_matrix.py \
+  --preset eval_policy_iteration \
+  --results-dir results/eval_policy_iteration
+
+scripts/plot_results.py \
+  --aggregate results/eval_policy_iteration/aggregate_summary.csv \
+  --output-dir results/eval_policy_iteration/analysis \
+  --baseline lru \
+  --report-mode auto
+```
+
+### Contention Calibration
+
+This study checks how node count, memory bandwidth, locality, and other
+architecture/workload dimensions create memory pressure.
+
+```bash
+scripts/run_matrix.py \
+  --preset eval_contention_calibration \
+  --dry-run \
+  --results-dir results/eval_contention_calibration_dry_run
+
+scripts/run_matrix.py \
+  --preset eval_contention_calibration \
+  --results-dir results/eval_contention_calibration
+
+scripts/plot_results.py \
+  --aggregate results/eval_contention_calibration/aggregate_summary.csv \
+  --output-dir results/eval_contention_calibration/analysis \
+  --baseline lru \
+  --report-mode auto
+```
+
+### Final Report Analysis
+
+Run the four matched final studies with three seeds:
+
+```bash
+scripts/run_matrix.py \
+  --preset eval_final_contention_scaling \
+  --seeds 8888,1729,31415 \
+  --results-dir results/final_contention_scaling
+
+scripts/run_matrix.py \
+  --preset eval_bursty_calibration \
+  --seeds 8888,1729,31415 \
+  --results-dir results/final_bursty_calibration
+
+scripts/run_matrix.py \
+  --preset eval_final_node_bandwidth \
+  --seeds 8888,1729,31415 \
+  --results-dir results/final_node_bandwidth
+
+scripts/run_matrix.py \
+  --preset eval_final_policy_iteration \
+  --seeds 8888,1729,31415 \
+  --results-dir results/final_policy_iteration
+```
+
+Combine their aggregates into the paper figures and seed-aware policy table:
+
+```bash
+scripts/plot_results.py \
+  --aggregate results/final_contention_scaling/aggregate_summary.csv \
+  --aggregate results/final_bursty_calibration/aggregate_summary.csv \
+  --aggregate results/final_node_bandwidth/aggregate_summary.csv \
+  --aggregate results/final_policy_iteration/aggregate_summary.csv \
+  --output-dir results/final_report_analysis \
+  --baseline lru \
+  --report-mode final_report
+```
+
+## Evaluation Preset Reference
+
+| Preset or family | Main purpose | Report mode |
+| --- | --- | --- |
+| `eval_policy_iteration`, `eval_policy_viability` | Compare practical and contention-aware cache policies | `policy_viability` |
+| `eval_contention_calibration`, `eval_bursty_calibration` | Validate memory pressure and arrival concurrency | `contention_calibration` |
+| `eval_channel_calibration`, `eval_channel_hotspots` | Study memory-channel parallelism and channel-local hotspots | `contention_calibration` |
+| `eval_interactions_*` | Study two interacting workload or architecture dimensions | `interaction` |
+| `eval_knob_*` | Demonstrate one isolated parameter sweep | `parameter_demo` |
+| `eval_contention_weight_sensitivity` | Sweep one contention score weight at a time | `weight_sensitivity` |
+| `eval_final_*` plus final bursty data | Generate the final paper figures and policy table | `final_report` |
+| `quick`, `phase8`, `phase_b`, `phase_c`, `phase_e` | General or historical exploration | `generic` or an explicitly compatible mode |
+
+Recognized single-preset evaluations can use `--report-mode auto`. Mixed
+aggregates normally need an explicit mode, such as `final_report` for the four
+final studies or `generic` for unrelated matrices.
+
+Available report modes:
+
+```text
+auto
+generic
+contention_calibration
+policy_viability
+interaction
+parameter_demo
+weight_sensitivity
+final_report
+```
+
+## Analysis Dependencies And Outputs
+
+Install the optional plotting dependencies:
+
+```bash
+python3 -m pip install -r requirements-analysis.txt
+```
+
+A matrix result directory contains:
+
+```text
+results/<results-name>/
+  generated_configs/
+  runs/
+  aggregate_summary.csv
+```
+
+Plotting adds an analysis directory containing:
+
+```text
+results/<results-name>/analysis/
+  report.md
+  policy_comparison.csv
+  policy_summary.csv
+  condition_summary.csv
+  plots/*.svg
+```
+
+Individual simulator runs write files including:
+
+```text
+summary.json
+per_node.csv
+latencies.csv
+contention_by_object.csv
+contention_by_channel.csv
+policy_diagnostics.csv
+cache_admissions.csv
+epoch_diagnostics.csv
+viability_metrics.csv
+```
+
+## Troubleshooting
+
+Show command-specific help:
+
+```bash
+./build/dm_simulator --help
+scripts/run_experiments.py --help
+scripts/run_matrix.py --help
+scripts/plot_results.py --help
+```
+
+Run a failing test with full output:
+
+```bash
+ctest --test-dir build -R scheduler --output-on-failure
+```
+
+If a test source exists but does not appear in `ctest --test-dir build -N`, it
+has not been registered in `CMakeLists.txt` or CMake needs to be reconfigured.
+
+Optional clean rebuild when the build directory is stale:
+
+```bash
+rm -rf build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+```
+
+A useful mental model is: `cmake` configures, `cmake --build` compiles, `ctest`
+runs tests, `run_matrix.py` generates matched experiments, and
+`plot_results.py` turns aggregate results into reports and figures.

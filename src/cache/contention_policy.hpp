@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -34,6 +35,9 @@ public:
     void on_access(CacheEntry& entry, SimTime access_time) const override;
     [[nodiscard]] bool should_admit(const Request& request,
                                     const Response& response) const override;
+    [[nodiscard]] AdmissionDecision admission_decision(
+        const Request& request,
+        const Response& response) const override;
     [[nodiscard]] std::optional<ObjectId> select_victim(
         const std::unordered_map<ObjectId, CacheEntry>& entries,
         const Request& incoming_request) const override;
@@ -78,6 +82,12 @@ private:
     [[nodiscard]] double normalized(double value, double max_value) const;
     // Count of local accesses for the specified object ID, which is used to determine the local hotness component of the contention score. 
     [[nodiscard]] std::uint64_t count_for(ObjectId object_id) const;
+    [[nodiscard]] std::uint64_t confirmation_count_for(
+        ObjectId object_id) const;
+    [[nodiscard]] bool uses_smoothed_telemetry() const noexcept;
+    [[nodiscard]] bool uses_local_confirmation() const noexcept;
+    [[nodiscard]] bool uses_hysteresis() const noexcept;
+    void prune_local_confirmation(EpochId epoch_id) const;
     // Estimates prior remote pain per byte of cache space from completed epoch summaries.
     [[nodiscard]] double cost_per_cache_byte(
         const ScoringContentionStats& stats) const;
@@ -94,6 +104,14 @@ private:
     const Stats& stats_;                                                        // A reference to the Stats object -> access to contention metrics and other statistics needed for scoring and decision-making.
     mutable std::optional<EpochId> current_epoch_;                              // The current epoch ID -> track epoch changes and update internal state.
     mutable std::unordered_map<ObjectId, std::uint64_t> local_access_counts_;   // Local access counts for objects -> used to determine the local hotness component of the contention score.
+    // Composite confirmation is independent from local hotness reset behavior:
+    // epoch buckets provide bounded memory and the aggregate keeps lookup O(1).
+    mutable std::map<
+        EpochId,
+        std::unordered_map<ObjectId, std::uint64_t>>
+        local_confirmation_by_epoch_;
+    mutable std::unordered_map<ObjectId, std::uint64_t>
+        local_confirmation_counts_;
     mutable std::unordered_map<ObjectId, ScoringContentionStats>                 
         previous_epoch_stats_;                                                  // Prior contention telemetry used to calculate scores for the current epoch.
     mutable NormalizationMaxima maxima_;                                        // Normalization maxima instance for contention features.

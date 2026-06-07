@@ -198,6 +198,22 @@ add_test(
 )
 
 add_test(
+    NAME experiment_matrix_contention_composite_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        quick
+        --policies
+        contention_aware_smoothed_reuse_gated,contention_aware_smoothed_reuse_gated_hysteresis
+        --dry-run
+        --expect-runs
+        2
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_contention_composite_dry_run
+)
+
+add_test(
     NAME experiment_matrix_phase_c_dry_run
     COMMAND
         ${Python3_EXECUTABLE}
@@ -222,7 +238,7 @@ add_test(
         eval_contention_calibration
         --dry-run
         --expect-runs
-        216
+        648
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_eval_contention_calibration_dry_run
 )
@@ -278,9 +294,65 @@ add_test(
         eval_policy_viability
         --dry-run
         --expect-runs
-        630
+        280
         --results-dir
         ${PROJECT_BINARY_DIR}/matrix_eval_policy_viability_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_policy_iteration_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_policy_iteration
+        --dry-run
+        --expect-runs
+        108
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_policy_iteration_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_final_contention_scaling_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_final_contention_scaling
+        --dry-run
+        --expect-runs
+        24
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_final_contention_scaling_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_final_node_bandwidth_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_final_node_bandwidth
+        --dry-run
+        --expect-runs
+        30
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_final_node_bandwidth_dry_run
+)
+
+add_test(
+    NAME experiment_matrix_eval_final_policy_iteration_dry_run
+    COMMAND
+        ${Python3_EXECUTABLE}
+        ${PROJECT_SOURCE_DIR}/scripts/run_matrix.py
+        --preset
+        eval_final_policy_iteration
+        --dry-run
+        --expect-runs
+        108
+        --results-dir
+        ${PROJECT_BINARY_DIR}/matrix_eval_final_policy_iteration_dry_run
 )
 
 add_test(

@@ -530,6 +530,133 @@ void test_contention_policy_reuse_gated_variant_requires_local_demand() {
     assert(cache.contains(9411));
 }
 
+ContentionPolicyConfig composite_contention_config() {
+    ContentionPolicyConfig config = contention_config(1.0);
+    config.variant = ContentionPolicyVariant::SmoothedReuseGated;
+    config.telemetry_history_epochs = 4;
+    config.telemetry_decay = 0.5;
+    config.local_reuse_gate_threshold = 2;
+    config.local_confirmation_window_epochs = 2;
+    config.local_confirmation_bypass_score_margin = 1.0;
+    config.weights.remote_access_weight = 1.0;
+    return config;
+}
+
+void test_contention_policy_composite_uses_smoothed_prior_epochs() {
+    Stats stats;
+    record_remote_object(stats, 9430, 4, 0, 0, 0);
+    record_remote_object(stats, 9431, 4, 0, 0, 1);
+
+    ContentionPolicyConfig config = composite_contention_config();
+    config.telemetry_decay = 1.0;
+    ContentionAwarePolicy policy(config, 16, stats);
+    policy.on_epoch_start(2);
+
+    assert(near(policy.score_object(9430, 8).remote_accesses, 1.0));
+    assert(near(policy.score_object(9431, 8).remote_accesses, 1.0));
+}
+
+void test_contention_policy_composite_confirmation_spans_bounded_window() {
+    Stats stats;
+    record_remote_object(stats, 9431, 4, 0, 0, 0);
+
+    ContentionAwarePolicy policy(composite_contention_config(), 16, stats);
+    policy.on_epoch_start(0);
+    policy.on_lookup(make_request(1, 9431, 8, 0), 1, false);
+
+    policy.on_epoch_start(1);
+    const Request current = make_request(2, 9431, 8, 1);
+    policy.on_lookup(current, 2, false);
+    assert(policy.admission_decision(current, make_response(2, 9431)).admit);
+
+    // Epoch zero falls outside a two-epoch window once epoch two begins, while
+    // epoch one remains valid. Advancing to epoch three expires both lookups.
+    policy.on_epoch_start(2);
+    policy.on_epoch_start(3);
+    const Request after_prune = make_request(3, 9431, 8, 3);
+    assert(!policy.admission_decision(after_prune,
+                                      make_response(3, 9431)).admit);
+    policy.on_lookup(after_prune, 3, false);
+    const auto pending =
+        policy.admission_decision(after_prune, make_response(3, 9431));
+    assert(!pending.admit);
+    assert(pending.reason == "local_confirmation_pending");
+}
+
+void test_contention_policy_composite_requires_score_before_confirmation() {
+    Stats stats;
+    ContentionPolicyConfig config = composite_contention_config();
+    config.weights.remote_access_weight = 0.0;
+    ContentionAwarePolicy policy(config, 16, stats);
+
+    policy.on_epoch_start(0);
+    const Request request = make_request(1, 9432, 8, 0);
+    policy.on_lookup(request, 1, false);
+    policy.on_lookup(request, 2, false);
+
+    const auto decision =
+        policy.admission_decision(request, make_response(1, 9432));
+    assert(!decision.admit);
+    assert(decision.reason == "below_min_score");
+}
+
+void test_contention_policy_composite_bypasses_only_strong_scores() {
+    Stats stats;
+    record_remote_object(stats, 9433, 4, 8, 0, 0);
+
+    ContentionPolicyConfig config = composite_contention_config();
+    config.weights.queue_wait_weight = 1.0;
+    LocalCache cache(
+        16,
+        std::make_unique<ContentionAwarePolicy>(config, 16, stats));
+    cache.on_epoch_start(1);
+
+    const Request strong = make_request(1, 9433, 8, 1);
+    assert(!cache.lookup(strong, 1));
+    assert(cache.admit(strong, make_response(1, 9433), 2));
+
+    const std::vector<PolicyDecisionRecord> diagnostics =
+        cache.policy_diagnostics();
+    assert(diagnostics.size() == 1);
+    assert(diagnostics[0].policy_variant == "smoothed_reuse_gated");
+    assert(diagnostics[0].recent_local_confirmation_count == 1);
+    assert(diagnostics[0].required_local_confirmation_count == 2);
+    assert(diagnostics[0].local_confirmation_bypassed);
+
+    ContentionPolicyConfig pending_config = composite_contention_config();
+    LocalCache pending_cache(
+        16,
+        std::make_unique<ContentionAwarePolicy>(pending_config, 16, stats));
+    pending_cache.on_epoch_start(1);
+    const Request borderline = make_request(2, 9433, 8, 1);
+    assert(!pending_cache.lookup(borderline, 3));
+    assert(!pending_cache.admit(borderline, make_response(2, 9433), 4));
+    assert(pending_cache.cache_admission_diagnostics()[0].reason ==
+           "local_confirmation_pending");
+}
+
+void test_contention_policy_composite_optional_hysteresis() {
+    Stats stats;
+    record_remote_object(stats, 9434, 9, 0, 0, 0);
+    record_remote_object(stats, 9435, 10, 0, 0, 0);
+
+    std::unordered_map<ObjectId, CacheEntry> entries;
+    entries.emplace(9434, CacheEntry{9434, 8, 1, 1});
+    const Request incoming = make_request(1, 9435, 8, 1);
+
+    ContentionPolicyConfig no_margin = composite_contention_config();
+    no_margin.min_admit_score = 0.0;
+    ContentionAwarePolicy no_margin_policy(no_margin, 16, stats);
+    no_margin_policy.on_epoch_start(1);
+    assert(no_margin_policy.select_victim(entries, incoming).has_value());
+
+    ContentionPolicyConfig with_margin = no_margin;
+    with_margin.eviction_score_margin = 0.1;
+    ContentionAwarePolicy hysteresis_policy(with_margin, 16, stats);
+    hysteresis_policy.on_epoch_start(1);
+    assert(!hysteresis_policy.select_victim(entries, incoming).has_value());
+}
+
 void test_contention_policy_hysteresis_rejects_borderline_eviction() {
     Stats stats;
     record_remote_object(stats, 9421, 3, 0, 0, 0);
@@ -606,6 +733,11 @@ int main() {
     test_contention_policy_smoothed_cost_density_uses_older_epochs();
     test_contention_policy_smoothed_variant_uses_older_prior_epochs();
     test_contention_policy_reuse_gated_variant_requires_local_demand();
+    test_contention_policy_composite_uses_smoothed_prior_epochs();
+    test_contention_policy_composite_confirmation_spans_bounded_window();
+    test_contention_policy_composite_requires_score_before_confirmation();
+    test_contention_policy_composite_bypasses_only_strong_scores();
+    test_contention_policy_composite_optional_hysteresis();
     test_contention_policy_hysteresis_rejects_borderline_eviction();
     test_contention_policy_evicts_lowest_scored_resident();
     return 0;

@@ -42,6 +42,44 @@ std::filesystem::path write_runner_config(const std::filesystem::path& path,
     return path;
 }
 
+std::filesystem::path write_composite_runner_config(
+    const std::filesystem::path& path,
+    const std::filesystem::path& output_dir) {
+    std::ofstream output(path);
+    output << "experiment:\n"
+           << "  name: composite_runner_test\n"
+           << "  output_dir: " << output_dir.string() << "\n"
+           << "memory:\n"
+           << "  node_id: 99\n"
+           << "  base_latency: 5\n"
+           << "  bandwidth_bytes_per_time: 8\n"
+           << "link:\n"
+           << "  one_way_latency: 2\n"
+           << "local_cache:\n"
+           << "  capacity_bytes: 64\n"
+           << "  hit_latency: 1\n"
+           << "  policy: contention_aware\n"
+           << "  contention:\n"
+           << "    variant: smoothed_reuse_gated\n"
+           << "    telemetry_history_epochs: 4\n"
+           << "    telemetry_decay: 0.5\n"
+           << "    local_reuse_gate_threshold: 3\n"
+           << "    local_confirmation_window_epochs: 2\n"
+           << "    local_confirmation_bypass_score_margin: 1.0\n"
+           << "workload:\n"
+           << "  seed: 99\n"
+           << "  compute_node_ids: [1]\n"
+           << "  object_count: 2\n"
+           << "  object_size_bytes: 8\n"
+           << "  requests_per_node_per_epoch: 1\n"
+           << "  epoch_count: 2\n"
+           << "  hot_set_size: 1\n"
+           << "  hot_access_probability: 1.0\n"
+           << "  hot_set_mode: static\n"
+           << "  cross_node_overlap: high\n";
+    return path;
+}
+
 std::string read_file(const std::filesystem::path& path) {
     std::ifstream input(path);
     return std::string((std::istreambuf_iterator<char>(input)),
@@ -110,6 +148,12 @@ void test_runner_writes_expected_outputs() {
         read_file(output_dir / "policy_diagnostics.csv");
     assert(policy_diagnostics.find("cost_density") != std::string::npos);
     assert(policy_diagnostics.find("cost_per_cache_byte") != std::string::npos);
+    assert(policy_diagnostics.find("recent_local_confirmation_count") !=
+           std::string::npos);
+    assert(policy_diagnostics.find("required_local_confirmation_count") !=
+           std::string::npos);
+    assert(policy_diagnostics.find("local_confirmation_bypassed") !=
+           std::string::npos);
     assert(line_count(output_dir / "cache_admissions.csv") == 3);
     assert(line_count(output_dir / "epoch_diagnostics.csv") == 1);
     assert(line_count(output_dir / "viability_metrics.csv") == 2);
@@ -120,9 +164,29 @@ void test_runner_writes_expected_outputs() {
     assert(viability_metrics.find("top_k") == std::string::npos);
 }
 
+void test_runner_writes_composite_confirmation_diagnostics() {
+    const std::filesystem::path base_dir =
+        std::filesystem::temp_directory_path() /
+        "dm_sim_composite_runner_test";
+    const std::filesystem::path output_dir = base_dir / "results";
+    const std::filesystem::path config_path = base_dir / "runner.yaml";
+    std::filesystem::create_directories(base_dir);
+    write_composite_runner_config(config_path, output_dir);
+
+    const dm_sim::ExperimentRunner runner;
+    (void)runner.run_config(config_path.string(), output_dir.string());
+
+    const std::string diagnostics =
+        read_file(output_dir / "policy_diagnostics.csv");
+    assert(diagnostics.find("smoothed_reuse_gated") != std::string::npos);
+    assert(diagnostics.find("below_min_score") != std::string::npos);
+    assert(diagnostics.find(",2,3,true,") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
     test_runner_writes_expected_outputs();
+    test_runner_writes_composite_confirmation_diagnostics();
     return 0;
 }

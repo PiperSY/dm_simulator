@@ -540,7 +540,10 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
               "policy_variant,"
               "total_score,local_hotness,remote_accesses,distinct_requesters,"
               "queue_wait,remote_service_time,cost_density,"
-              "cost_per_cache_byte,size_penalty,evicted_objects\n";
+              "cost_per_cache_byte,size_penalty,"
+              "recent_local_confirmation_count,"
+              "required_local_confirmation_count,"
+              "local_confirmation_bypassed,evicted_objects\n";
     output << std::fixed << std::setprecision(6);
     for (const PolicyDecisionRecord& decision :
          simulator.policy_diagnostics()) {
@@ -560,6 +563,10 @@ void write_policy_diagnostics_csv(const std::filesystem::path& path,
                << decision.score.cost_density << ","
                << decision.score.cost_per_cache_byte << ","
                << decision.score.size_penalty << ","
+               << decision.recent_local_confirmation_count << ","
+               << decision.required_local_confirmation_count << ","
+               << (decision.local_confirmation_bypassed ? "true" : "false")
+               << ","
                << join_evicted_objects(decision.evicted_objects) << "\n";
     }
 }

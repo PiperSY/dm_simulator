@@ -26,6 +26,10 @@ void ContentionAwarePolicy::on_lookup(const Request& request,
 
     // Count both hits and misses: either one implies intent for object.
     ++local_access_counts_[request.object_id];
+    if (uses_local_confirmation()) {
+        ++local_confirmation_by_epoch_[request.epoch_id][request.object_id];
+        ++local_confirmation_counts_[request.object_id];
+    }
 }
 
 void ContentionAwarePolicy::on_epoch_start(EpochId epoch_id) const {
@@ -38,6 +42,9 @@ void ContentionAwarePolicy::on_epoch_start(EpochId epoch_id) const {
     if (config_.reset_on_epoch_change) {
         local_access_counts_.clear();
     }
+    if (uses_local_confirmation()) {
+        prune_local_confirmation(epoch_id);
+    }
 
     previous_epoch_stats_.clear();
     maxima_ = NormalizationMaxima{};
@@ -46,9 +53,7 @@ void ContentionAwarePolicy::on_epoch_start(EpochId epoch_id) const {
     // only epoch N-1. The smoothed variant optionally blends several prior
     // epochs using decay^age so older data helps only when configured.
     const std::uint64_t history_epochs =
-        config_.variant == ContentionPolicyVariant::Smoothed
-            ? config_.telemetry_history_epochs
-            : 1;
+        uses_smoothed_telemetry() ? config_.telemetry_history_epochs : 1;
     for (std::uint64_t age = 0; age < history_epochs; ++age) {
         if (epoch_id <= age) {
             break;
@@ -73,16 +78,48 @@ void ContentionAwarePolicy::on_access(CacheEntry& entry,
 
 bool ContentionAwarePolicy::should_admit(const Request& request,
                                          const Response& response) const {
+    return admission_decision(request, response).admit;
+}
+
+AdmissionDecision ContentionAwarePolicy::admission_decision(
+    const Request& request,
+    const Response& response) const {
     (void)response;
     // Reuse-gated mode prevents a globally painful object from entering this
     // node's private cache until this node has shown enough local demand.
     if (config_.variant == ContentionPolicyVariant::ReuseGated &&
         count_for(request.object_id) < config_.local_reuse_gate_threshold) {
-        return false;
+        return {false, "policy_rejected"};
     }
 
-    return score_object(request.object_id, request.size_bytes).total_score >=
-           config_.min_admit_score;
+    const ContentionScoreComponents score =
+        score_object(request.object_id, request.size_bytes);
+    if (score.total_score < config_.min_admit_score) {
+        return {false,
+                uses_local_confirmation() ? "below_min_score"
+                                          : "policy_rejected"};
+    }
+
+    if (!uses_local_confirmation()) {
+        return {true, "admitted"};
+    }
+
+    const std::uint64_t confirmation_count =
+        confirmation_count_for(request.object_id);
+    if (confirmation_count >= config_.local_reuse_gate_threshold) {
+        return {true, "admitted"};
+    }
+
+    // Exceptionally expensive remote objects should not wait for another miss
+    // merely to satisfy confirmation. The explicit margin keeps this bypass
+    // selective instead of weakening the gate for borderline candidates.
+    if (score.total_score >=
+        config_.min_admit_score +
+            config_.local_confirmation_bypass_score_margin) {
+        return {true, "admitted"};
+    }
+
+    return {false, "local_confirmation_pending"};
 }
 
 std::optional<ObjectId> ContentionAwarePolicy::select_victim(
@@ -129,9 +166,7 @@ std::optional<ObjectId> ContentionAwarePolicy::select_victim(
     // object is better than the weakest resident. Hysteresis raises that bar
     // by a configurable margin to avoid borderline admit/evict oscillation.
     const double required_margin =
-        config_.variant == ContentionPolicyVariant::Hysteresis
-            ? config_.eviction_score_margin
-            : 0.0;
+        uses_hysteresis() ? config_.eviction_score_margin : 0.0;
     if (incoming_score.total_score <=
         victim_score.total_score + required_margin) {
         return std::nullopt;
@@ -162,6 +197,18 @@ void ContentionAwarePolicy::on_admission_result(
     record.reason = reason;
     record.policy_variant = variant_label();
     record.score = score_object(request.object_id, request.size_bytes);
+    if (uses_local_confirmation()) {
+        record.recent_local_confirmation_count =
+            confirmation_count_for(request.object_id);
+        record.required_local_confirmation_count =
+            config_.local_reuse_gate_threshold;
+        record.local_confirmation_bypassed =
+            record.recent_local_confirmation_count <
+                record.required_local_confirmation_count &&
+            record.score.total_score >=
+                config_.min_admit_score +
+                    config_.local_confirmation_bypass_score_margin;
+    }
     record.evicted_objects = evicted_objects;
     diagnostics_.push_back(record);
 }
@@ -255,6 +302,52 @@ std::uint64_t ContentionAwarePolicy::count_for(ObjectId object_id) const {
     return it->second;
 }
 
+std::uint64_t ContentionAwarePolicy::confirmation_count_for(
+    ObjectId object_id) const {
+    const auto it = local_confirmation_counts_.find(object_id);
+    return it == local_confirmation_counts_.end() ? 0 : it->second;
+}
+
+bool ContentionAwarePolicy::uses_smoothed_telemetry() const noexcept {
+    return config_.variant == ContentionPolicyVariant::Smoothed ||
+           config_.variant == ContentionPolicyVariant::SmoothedReuseGated;
+}
+
+bool ContentionAwarePolicy::uses_local_confirmation() const noexcept {
+    return config_.variant == ContentionPolicyVariant::SmoothedReuseGated;
+}
+
+bool ContentionAwarePolicy::uses_hysteresis() const noexcept {
+    return config_.variant == ContentionPolicyVariant::Hysteresis ||
+           (config_.variant ==
+                ContentionPolicyVariant::SmoothedReuseGated &&
+            config_.eviction_score_margin > 0.0);
+}
+
+void ContentionAwarePolicy::prune_local_confirmation(EpochId epoch_id) const {
+    const std::uint64_t window =
+        std::max<std::uint64_t>(config_.local_confirmation_window_epochs, 1);
+    const EpochId first_retained_epoch =
+        epoch_id >= window - 1 ? epoch_id - (window - 1) : 0;
+
+    auto it = local_confirmation_by_epoch_.begin();
+    while (it != local_confirmation_by_epoch_.end() &&
+           it->first < first_retained_epoch) {
+        for (const auto& [object_id, count] : it->second) {
+            auto aggregate = local_confirmation_counts_.find(object_id);
+            if (aggregate == local_confirmation_counts_.end()) {
+                continue;
+            }
+            if (aggregate->second <= count) {
+                local_confirmation_counts_.erase(aggregate);
+            } else {
+                aggregate->second -= count;
+            }
+        }
+        it = local_confirmation_by_epoch_.erase(it);
+    }
+}
+
 double ContentionAwarePolicy::cost_per_cache_byte(
     const ScoringContentionStats& stats) const {
     if (stats.remote_accesses <= 0.0 || stats.bytes_served <= 0.0) {
@@ -316,6 +409,8 @@ std::string ContentionAwarePolicy::variant_label() const {
         return "reuse_gated";
     case ContentionPolicyVariant::Hysteresis:
         return "hysteresis";
+    case ContentionPolicyVariant::SmoothedReuseGated:
+        return "smoothed_reuse_gated";
     }
 
     return "unknown";

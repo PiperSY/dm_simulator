@@ -339,6 +339,8 @@ void test_phase8_contention_policy_config_parses() {
                    "    telemetry_history_epochs: 3\n"
                    "    telemetry_decay: 0.5\n"
                    "    local_reuse_gate_threshold: 4\n"
+                   "    local_confirmation_window_epochs: 3\n"
+                   "    local_confirmation_bypass_score_margin: 1.25\n"
                    "    eviction_score_margin: 0.25");
 
     const std::filesystem::path path =
@@ -362,6 +364,9 @@ void test_phase8_contention_policy_config_parses() {
     assert(local_cache.contention.telemetry_history_epochs == 3);
     assert(local_cache.contention.telemetry_decay == 0.5);
     assert(local_cache.contention.local_reuse_gate_threshold == 4);
+    assert(local_cache.contention.local_confirmation_window_epochs == 3);
+    assert(local_cache.contention.local_confirmation_bypass_score_margin ==
+           1.25);
     assert(local_cache.contention.eviction_score_margin == 0.25);
 }
 
@@ -381,8 +386,40 @@ void test_phase_e_contention_variant_defaults_to_v1() {
     assert(contention.telemetry_history_epochs == 1);
     assert(contention.telemetry_decay == 1.0);
     assert(contention.local_reuse_gate_threshold == 2);
+    assert(contention.local_confirmation_window_epochs == 2);
+    assert(contention.local_confirmation_bypass_score_margin == 1.0);
     assert(contention.eviction_score_margin == 0.0);
     assert(contention.weights.cost_density_weight == 0.0);
+}
+
+void test_composite_contention_variant_parses() {
+    std::string config = valid_config_text();
+    config.replace(config.find("policy: lru"),
+                   std::string("policy: lru").size(),
+                   "policy: contention_aware\n"
+                   "  contention:\n"
+                   "    variant: smoothed_reuse_gated\n"
+                   "    telemetry_history_epochs: 4\n"
+                   "    telemetry_decay: 0.5\n"
+                   "    local_reuse_gate_threshold: 2\n"
+                   "    local_confirmation_window_epochs: 2\n"
+                   "    local_confirmation_bypass_score_margin: 1.0\n"
+                   "    eviction_score_margin: 0.1");
+
+    const std::filesystem::path path =
+        write_temp_config("dm_sim_composite_contention.yaml", config);
+    const auto contention =
+        dm_sim::load_experiment_config(path.string())
+            .simulation.local_cache.contention;
+
+    assert(contention.variant ==
+           ContentionPolicyVariant::SmoothedReuseGated);
+    assert(contention.telemetry_history_epochs == 4);
+    assert(contention.telemetry_decay == 0.5);
+    assert(contention.local_reuse_gate_threshold == 2);
+    assert(contention.local_confirmation_window_epochs == 2);
+    assert(contention.local_confirmation_bypass_score_margin == 1.0);
+    assert(contention.eviction_score_margin == 0.1);
 }
 
 void test_invalid_contention_policy_config_fails() {
@@ -426,6 +463,77 @@ void test_invalid_contention_policy_config_fails() {
 }
 
 void test_invalid_phase_e_contention_variant_fields_fail() {
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    variant: smoothed_reuse_gated\n"
+                       "    local_confirmation_window_epochs: 0");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_confirmation_window.yaml",
+                              config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find(
+                       "local_cache.contention.local_confirmation_window_epochs") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    variant: smoothed_reuse_gated\n"
+                       "    local_confirmation_bypass_score_margin: -0.1");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_invalid_confirmation_bypass.yaml",
+                              config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find(
+                       "local_cache.contention."
+                       "local_confirmation_bypass_score_margin") !=
+                   std::string::npos);
+        }
+    }
+
+    {
+        std::string config = valid_config_text();
+        config.replace(config.find("policy: lru"),
+                       std::string("policy: lru").size(),
+                       "policy: contention_aware\n"
+                       "  contention:\n"
+                       "    variant: smoothed_reuse_gated\n"
+                       "    local_confirmation_bypass_score_margin: .nan");
+        const std::filesystem::path path =
+            write_temp_config("dm_sim_nonfinite_confirmation_bypass.yaml",
+                              config);
+
+        try {
+            (void)dm_sim::load_experiment_config(path.string());
+            assert(false);
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            assert(message.find(
+                       "local_cache.contention."
+                       "local_confirmation_bypass_score_margin") !=
+                   std::string::npos);
+        }
+    }
+
     {
         std::string config = valid_config_text();
         config.replace(config.find("policy: lru"),
@@ -713,6 +821,7 @@ int main() {
     test_hotness_history_mode_defaults_and_validation();
     test_phase8_contention_policy_config_parses();
     test_phase_e_contention_variant_defaults_to_v1();
+    test_composite_contention_variant_parses();
     test_invalid_contention_policy_config_fails();
     test_invalid_phase_e_contention_variant_fields_fail();
     test_invalid_phase_b_workload_fields_fail();

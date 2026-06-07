@@ -54,6 +54,8 @@ enum class ContentionPolicyVariant {
     ReuseGated,
     // Requires an incoming object to beat a resident by a configurable margin.
     Hysteresis,
+    // Combines bounded telemetry smoothing with softened local confirmation.
+    SmoothedReuseGated,
 };
 
 struct ContentionPolicyConfig {
@@ -66,6 +68,8 @@ struct ContentionPolicyConfig {
     std::uint64_t telemetry_history_epochs = 1;
     double telemetry_decay = 1.0;
     std::uint64_t local_reuse_gate_threshold = 2;
+    std::uint64_t local_confirmation_window_epochs = 2;
+    double local_confirmation_bypass_score_margin = 1.0;
     double eviction_score_margin = 0.0;
 };
 
